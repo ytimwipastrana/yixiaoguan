@@ -1,5 +1,6 @@
 import streamlit as st
 import time
+import re
 from datetime import datetime
 from llm_service import LLMService
 
@@ -434,12 +435,37 @@ for idx, message in enumerate(st.session_state.messages):
         </div>
         """, unsafe_allow_html=True)
     else:
+        # ===== 增强版换行处理 =====
+        content = message["content"]
+        
+        # 处理各种换行符
+        content = content.replace('\r\n', '\n')
+        content = content.replace('\r', '\n')
+        
+        # 处理特殊符号
+        content = content.replace('。', '。<br>')
+        content = content.replace('：', '：<br>')
+        content = content.replace('？', '？<br>')
+        content = content.replace('！', '！<br>')
+        content = content.replace('；', '；<br>')
+        content = content.replace('；', '；<br>')
+        
+        # 处理数字序号
+        content = re.sub(r'(\d+\.)', r'<br>\1', content)
+        content = re.sub(r'（(\d+)）', r'<br>（\1）', content)
+        
+        # 最后把剩下的 \n 也替换成 <br>
+        formatted_content = content.replace('\n', '<br>')
+        
+        # 处理多个连续的 <br>
+        formatted_content = re.sub(r'(<br>)\1+', '<br><br>', formatted_content)
+        
         col1, col2 = st.columns([20, 1])
         with col1:
             st.markdown(f"""
             <div class="message-row assistant">
                 <div class="message-bubble assistant">
-                    <div class="message-content">{message["content"]}</div>
+                    <div class="message-content">{formatted_content}</div>
                     <div class="timestamp">{datetime.now().strftime("%H:%M")}</div>
                 </div>
             </div>
