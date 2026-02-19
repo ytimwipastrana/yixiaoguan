@@ -8,7 +8,6 @@ import re
 import streamlit as st
 import json
 import time
-from functools import lru_cache
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -64,14 +63,6 @@ class LLMService:
         cleaned = cleaned.strip()
         
         return cleaned
-    
-    @lru_cache(maxsize=128)
-    def _get_cached_response(self, question_hash):
-        """
-        缓存相同问题的回答
-        注意：这里只缓存完全相同的问题，用于高频重复问题
-        """
-        return None  # 实际缓存逻辑在ask中实现
     
     def ask(self, question, conversation_id=None, max_retries=3):
         """
