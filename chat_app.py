@@ -1,14 +1,17 @@
 import streamlit as st
 import time
 import re
+import csv
+import os
+import pandas as pd
 from datetime import datetime
 from llm_service import LLMService
 
 # ========== 页面配置 ==========
 st.set_page_config(
-    page_title="医小管 AI辅导员",
+    page_title="医小管",
     page_icon="🩺",
-    layout="wide",
+    layout="centered",
     initial_sidebar_state="collapsed"
 )
 
@@ -19,17 +22,15 @@ if "messages" not in st.session_state:
             "role": "assistant", 
             "content": """👋 你好，我是医小管
 
-**你的专属AI辅导员**
+你的专属AI辅导员
 
 ---
 
-💡 **试试问我：**
+💡 试试问我：
 • 奖学金怎么申请？
 • 医保报销比例？
 • 考研有什么要求？
-• 选课系统怎么进？
-
----"""
+• 选课系统怎么进？"""
         }
     ]
 
@@ -45,60 +46,106 @@ if "input_key" not in st.session_state:
 if "is_loading" not in st.session_state:
     st.session_state.is_loading = False
 
-# ========== 深色模式CSS（极简高级） ==========
+# ========== 日志记录函数 ==========
+def log_conversation(question, answer, sources, feedback=None, session_id=None):
+    """记录对话日志，用于后续分析"""
+    log_file = "evolution_logs.csv"
+    
+    try:
+        if not os.path.exists(log_file):
+            with open(log_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    '时间', '会话ID', '问题', '回答', '回答长度', 
+                    '来源数量', '用户反馈', '响应时间(ms)', '是否成功'
+                ])
+        
+        is_success = len(sources) > 0 and len(answer) > 20
+        
+        with open(log_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                session_id or '',
+                question[:100] + '...' if len(question) > 100 else question,
+                answer[:200] + '...' if len(answer) > 200 else answer,
+                len(answer),
+                len(sources) if sources else 0,
+                feedback or '',
+                int((time.time() % 1) * 1000),
+                is_success
+            ])
+    except Exception as e:
+        print(f"日志记录失败: {e}")
+
+# ========== 强制换行函数 ==========
+def format_with_line_breaks(text):
+    """
+    强制处理换行，确保AI回答中的每个句子都能正确换行
+    """
+    if not text:
+        return text
+    
+    # 1. 处理各种换行符
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    
+    # 2. 在中文标点符号后添加换行
+    text = text.replace('。', '。\n')
+    text = text.replace('？', '？\n')
+    text = text.replace('！', '！\n')
+    text = text.replace('；', '；\n')
+    text = text.replace('：', '：\n')
+    
+    # 3. 在数字序号前添加换行（如 1. 2. 3. 或 一、二、三）
+    text = re.sub(r'(\d+\.)', r'\n\1', text)
+    text = re.sub(r'([一二三四五六七八九十])[、.]', r'\n\1、', text)
+    
+    # 4. 处理括号内的序号
+    text = re.sub(r'（(\d+)）', r'\n（\1）', text)
+    
+    # 5. 将连续的换行符替换为单个换行
+    text = re.sub(r'\n\s*\n', '\n\n', text)
+    
+    # 6. 最后将换行符转换为HTML的<br>标签
+    lines = text.split('\n')
+    formatted = '<br>'.join(lines)
+    
+    return formatted
+
+# ========== 极简CSS（高级感） ==========
 st.markdown("""
 <style>
-    /* 全局深色背景 */
+    /* 全局样式 - 极简高级 */
     .stApp {
         background: #0A0A0A;
     }
     
-    /* 隐藏Streamlit默认元素 */
+    /* 隐藏默认元素 */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
     
-    /* 主容器 */
-    .main-container {
-        max-width: 900px;
-        margin: 0 auto;
-        padding: 2rem 1rem;
-    }
-    
-    /* 标题区域 */
-    .title-section {
+    /* 标题 - 极简 */
+    .title {
         text-align: center;
-        margin-bottom: 3rem;
-    }
-    
-    .title-icon {
-        font-size: 3.5rem;
-        margin-bottom: 0.5rem;
-        opacity: 0.9;
-    }
-    
-    .title-main {
-        font-size: 2.2rem;
-        font-weight: 600;
-        background: linear-gradient(135deg, #FFFFFF 0%, #A0A0A0 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0.3rem;
-        letter-spacing: -0.02em;
-    }
-    
-    .title-sub {
-        color: #666666;
-        font-size: 0.9rem;
+        font-size: 2rem;
         font-weight: 400;
-        letter-spacing: 0.3px;
+        color: #FFFFFF;
+        margin-bottom: 2rem;
+        letter-spacing: 1px;
+    }
+    
+    .title span {
+        color: #666;
+        font-size: 0.9rem;
+        display: block;
+        font-weight: 300;
     }
     
     /* 聊天容器 */
     .chat-container {
-        max-width: 800px;
+        max-width: 700px;
         margin: 0 auto;
-        padding: 0 1rem;
     }
     
     /* 消息行 */
@@ -116,314 +163,209 @@ st.markdown("""
         justify-content: flex-start;
     }
     
-    /* 消息气泡 - 深色模式优化 */
+    /* 消息气泡 - 极简设计 */
     .message-bubble {
-        max-width: 75%;
+        max-width: 80%;
         padding: 1rem 1.4rem;
-        border-radius: 1.5rem;
-        position: relative;
-        word-wrap: break-word;
+        border-radius: 1.2rem;
         line-height: 1.6;
-        font-size: 1rem;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        font-size: 0.95rem;
+        word-wrap: break-word;
     }
     
     .message-bubble.user {
-        background: #2D2D2D;
+        background: #1E1E1E;
         color: #FFFFFF;
-        border: 1px solid #3D3D3D;
-        border-bottom-right-radius: 0.3rem;
+        border: 1px solid #333;
     }
     
     .message-bubble.assistant {
-        background: #1A1A1A;
+        background: #0F0F0F;
         color: #E0E0E0;
         border: 1px solid #2A2A2A;
-        border-bottom-left-radius: 0.3rem;
     }
     
-    /* 消息内容样式 */
+    /* 消息内容 - 强制换行 */
     .message-content {
         white-space: pre-wrap;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
     }
     
-    .message-content strong {
-        color: #FFFFFF;
-        font-weight: 600;
+    .message-content br {
+        display: block;
+        content: "";
+        margin-top: 0.3rem;
     }
     
-    .message-content p {
-        margin: 0.5rem 0;
-    }
-    
-    /* 时间戳 */
+    /* 时间戳 - 极淡 */
     .timestamp {
-        font-size: 0.7rem;
-        color: #666666;
+        font-size: 0.65rem;
+        color: #444;
         margin-top: 0.5rem;
         text-align: right;
-        letter-spacing: 0.3px;
     }
     
-    .message-bubble.user .timestamp {
-        color: #888888;
+    /* 反馈按钮区域 - 极简 */
+    .feedback-container {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: flex-start;
+        margin-top: 0.3rem;
+        margin-left: 0.5rem;
+        opacity: 0.4;
+        transition: opacity 0.2s;
     }
     
-    /* 来源信息样式 */
-    .source-item {
-        background: #1A1A1A;
-        padding: 0.8rem 1rem;
+    .feedback-container:hover {
+        opacity: 1;
+    }
+    
+    .feedback-btn {
+        background: none;
+        border: none;
+        color: #666;
+        font-size: 0.8rem;
+        cursor: pointer;
+        padding: 0.2rem 0.5rem;
         border-radius: 1rem;
-        margin: 0.5rem 0;
-        color: #A0A0A0;
-        border: 1px solid #2A2A2A;
-        font-size: 0.9rem;
-        line-height: 1.5;
-        transition: all 0.2s ease;
+        transition: all 0.2s;
     }
     
-    .source-item:hover {
-        background: #202020;
-        border-color: #3A3A3A;
+    .feedback-btn:hover {
+        color: #1976d2;
+        background: #1A1A1A;
     }
     
-    .source-icon {
-        color: #4A4A4A;
-        margin-right: 0.5rem;
+    /* 来源折叠框 - 极简 */
+    .source-item {
+        background: #0A0A0A;
+        padding: 0.5rem 0.8rem;
+        border-radius: 0.5rem;
+        margin: 0.3rem 0;
+        color: #666;
+        border-left: 2px solid #333;
+        font-size: 0.8rem;
     }
     
-    /* 输入区域 */
+    /* 输入区域 - 极简 */
     .input-section {
-        max-width: 800px;
+        max-width: 700px;
         margin: 2rem auto 0;
-        padding: 1rem;
-    }
-    
-    /* 输入框容器 */
-    .stTextInput {
+        padding: 0 1rem;
         position: relative;
     }
     
-    /* 输入框样式 - 深色模式 */
     .stTextInput input {
-        background: #1A1A1A !important;
+        background: #0F0F0F !important;
         border: 1px solid #2A2A2A !important;
         border-radius: 2rem !important;
-        padding: 1rem 1.5rem !important;
-        font-size: 1rem !important;
+        padding: 0.8rem 1.2rem !important;
         color: #FFFFFF !important;
-        caret-color: #FFFFFF !important;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
-        transition: all 0.3s ease !important;
+        font-size: 0.95rem !important;
+        transition: border-color 0.2s !important;
     }
     
     .stTextInput input:focus {
-        border-color: #404040 !important;
-        background: #202020 !important;
-        box-shadow: 0 6px 16px rgba(0,0,0,0.4) !important;
+        border-color: #1976d2 !important;
+        outline: none !important;
     }
     
     .stTextInput input::placeholder {
-        color: #666666 !important;
-        font-size: 0.95rem !important;
+        color: #444 !important;
     }
     
-    /* 隐藏输入框提示 */
-    div[data-testid="InputInstructions"] {
-        display: none !important;
-    }
-    
-    /* 发送按钮 */
+    /* 发送按钮 - 极简 */
     .stButton > button {
-        background: #2D2D2D !important;
-        border: 1px solid #3D3D3D !important;
+        background: #1A1A1A !important;
+        border: 1px solid #333 !important;
         border-radius: 2rem !important;
-        padding: 1rem 2rem !important;
-        color: #FFFFFF !important;
-        font-weight: 500 !important;
-        font-size: 1rem !important;
-        transition: all 0.3s ease !important;
-        width: 100% !important;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3) !important;
+        color: #CCC !important;
+        padding: 0.5rem 1.5rem !important;
+        font-size: 0.9rem !important;
+        transition: all 0.2s !important;
     }
     
     .stButton > button:hover {
-        background: #353535 !important;
-        border-color: #454545 !important;
-        transform: translateY(-1px) !important;
-        box-shadow: 0 6px 16px rgba(0,0,0,0.4) !important;
+        border-color: #1976d2 !important;
+        color: #1976d2 !important;
+        background: #1A1A1A !important;
     }
     
-    /* 加载动画 */
+    /* 加载动画 - 极简 */
     .loading-container {
         display: flex;
         justify-content: flex-start;
-        margin: 1.5rem 0;
+        margin: 1rem 0;
     }
     
     .loading-indicator {
         display: flex;
         align-items: center;
-        gap: 1rem;
-        padding: 1rem 1.5rem;
-        background: #1A1A1A;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        background: #0F0F0F;
         border-radius: 2rem;
         border: 1px solid #2A2A2A;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     }
     
     .loading-dots {
         display: flex;
-        gap: 0.3rem;
+        gap: 0.2rem;
     }
     
     .loading-dot {
-        width: 0.5rem;
-        height: 0.5rem;
-        background: #666666;
+        width: 0.4rem;
+        height: 0.4rem;
+        background: #666;
         border-radius: 50%;
         animation: pulse 1.4s infinite;
     }
     
-    .loading-dot:nth-child(2) {
-        animation-delay: 0.2s;
-    }
-    
-    .loading-dot:nth-child(3) {
-        animation-delay: 0.4s;
-    }
-    
-    .loading-text {
-        color: #888888;
-        font-size: 0.9rem;
+    /* 隐私提示 - 底部小字 */
+    .privacy-note {
+        text-align: center;
+        color: #333;
+        font-size: 0.7rem;
+        margin-top: 2rem;
+        padding: 1rem;
         letter-spacing: 0.3px;
+        border-top: 1px solid #1A1A1A;
     }
     
-    /* 复制按钮 */
-    .stButton > button[kind="secondary"] {
-        background: transparent !important;
-        border: none !important;
-        padding: 0.3rem !important;
-        color: #666666 !important;
-        font-size: 1rem !important;
-        box-shadow: none !important;
-    }
-    
-    .stButton > button[kind="secondary"]:hover {
-        color: #FFFFFF !important;
-        background: transparent !important;
-    }
-    
-    /* 动画 */
     @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(10px); }
+        from { opacity: 0; transform: translateY(5px); }
         to { opacity: 1; transform: translateY(0); }
     }
     
     @keyframes pulse {
         0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
-        30% { transform: translateY(-4px); opacity: 1; }
-    }
-    
-    /* 分隔线 */
-    .divider {
-        height: 1px;
-        background: linear-gradient(90deg, transparent, #2A2A2A, transparent);
-        margin: 2rem 0;
-    }
-    
-    /* 侧边栏样式 */
-    .sidebar-content {
-        background: #0F0F0F;
-        padding: 1.5rem;
-        border-radius: 1rem;
-        border: 1px solid #2A2A2A;
-    }
-    
-    /* 统计数字 */
-    .metric-container {
-        background: #1A1A1A;
-        padding: 1rem;
-        border-radius: 1rem;
-        border: 1px solid #2A2A2A;
-        text-align: center;
-    }
-    
-    .metric-value {
-        font-size: 1.5rem;
-        font-weight: 600;
-        color: #FFFFFF;
-    }
-    
-    .metric-label {
-        font-size: 0.8rem;
-        color: #888888;
-        margin-top: 0.3rem;
+        30% { transform: translateY(-3px); opacity: 1; }
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ========== 页面标题 ==========
+# ========== 极简标题 ==========
 st.markdown("""
-<div class="title-section">
-    <div class="title-icon">🩺</div>
-    <div class="title-main">医小管</div>
-    <div class="title-sub">AI辅导员 · 医药管理学院</div>
+<div class="title">
+    🩺 医小管
+    <span>AI辅导员 · 测试版</span>
 </div>
 """, unsafe_allow_html=True)
 
-# ========== 侧边栏 ==========
+# ========== 极简侧边栏 ==========
 with st.sidebar:
-    st.markdown('<div class="sidebar-content">', unsafe_allow_html=True)
-    
-    st.markdown("### 💻 系统")
-    
-    # API连接状态
-    if hasattr(st.session_state.llm, 'api_key') and st.session_state.llm.api_key:
-        st.markdown("🟢 已连接")
-    else:
-        st.markdown("🔴 未连接")
-    
-    st.markdown("---")
-    
-    # 隐私说明
-    st.markdown("### 🔒 隐私")
-    st.markdown("对话仅保存在本地")
-    
-    st.markdown("---")
-    
-    # 对话统计
-    st.markdown("### 📊 统计")
-    user_msgs = sum(1 for m in st.session_state.messages if m["role"] == "user")
-    assistant_msgs = sum(1 for m in st.session_state.messages if m["role"] == "assistant")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown(f'<div class="metric-value">{user_msgs}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="metric-label">用户</div>', unsafe_allow_html=True)
-    with col2:
-        st.markdown(f'<div class="metric-value">{assistant_msgs}</div>', unsafe_allow_html=True)
-        st.markdown('<div class="metric-label">AI</div>', unsafe_allow_html=True)
-    
-    st.markdown("---")
-    
-    # 清空按钮
-    if st.button("🗑️ 清空", use_container_width=True):
+    st.markdown("### ⚡")
+    if st.button("🗑️", help="清空对话"):
         st.session_state.messages = [
-            {
-                "role": "assistant", 
-                "content": "👋 你好，我是医小管"
-            }
+            {"role": "assistant", "content": "👋 你好，我是医小管\n\n**你的专属AI辅导员**"}
         ]
         st.session_state.conversation_id = None
         st.rerun()
-    
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # ========== 聊天区域 ==========
 st.markdown('<div class="chat-container">', unsafe_allow_html=True)
 
-# 显示聊天历史
 for idx, message in enumerate(st.session_state.messages):
     if message["role"] == "user":
         st.markdown(f"""
@@ -435,56 +377,61 @@ for idx, message in enumerate(st.session_state.messages):
         </div>
         """, unsafe_allow_html=True)
     else:
-        # ===== 增强版换行处理 =====
-        content = message["content"]
+        # ===== 强制换行处理 =====
+        formatted_content = format_with_line_breaks(message["content"])
         
-        # 处理各种换行符
-        content = content.replace('\r\n', '\n')
-        content = content.replace('\r', '\n')
-        
-        # 处理特殊符号
-        content = content.replace('。', '。<br>')
-        content = content.replace('：', '：<br>')
-        content = content.replace('？', '？<br>')
-        content = content.replace('！', '！<br>')
-        content = content.replace('；', '；<br>')
-        content = content.replace('；', '；<br>')
-        
-        # 处理数字序号
-        content = re.sub(r'(\d+\.)', r'<br>\1', content)
-        content = re.sub(r'（(\d+)）', r'<br>（\1）', content)
-        
-        # 最后把剩下的 \n 也替换成 <br>
-        formatted_content = content.replace('\n', '<br>')
-        
-        # 处理多个连续的 <br>
-        formatted_content = re.sub(r'(<br>)\1+', '<br><br>', formatted_content)
-        
-        col1, col2 = st.columns([20, 1])
-        with col1:
-            st.markdown(f"""
-            <div class="message-row assistant">
-                <div class="message-bubble assistant">
-                    <div class="message-content">{formatted_content}</div>
-                    <div class="timestamp">{datetime.now().strftime("%H:%M")}</div>
-                </div>
+        # AI消息主体
+        st.markdown(f"""
+        <div class="message-row assistant">
+            <div class="message-bubble assistant">
+                <div class="message-content">{formatted_content}</div>
+                <div class="timestamp">{datetime.now().strftime("%H:%M")}</div>
             </div>
-            """, unsafe_allow_html=True)
-            
-            if "sources" in message and message["sources"]:
-                with st.expander("📚 来源"):
-                    for i, source in enumerate(message["sources"], 1):
-                        st.markdown(f"""
-                        <div class="source-item">
-                            <span class="source-icon">📄</span> {source[:150]}...
-                        </div>
-                        """, unsafe_allow_html=True)
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # ===== 反馈按钮区域 =====
+        col1, col2 = st.columns([1, 10])
+        with col1:
+            fb_col1, fb_col2 = st.columns(2)
+            with fb_col1:
+                if st.button("👍", key=f"like_{idx}", help="有帮助"):
+                    prev_question = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
+                    log_conversation(
+                        prev_question,
+                        message["content"],
+                        message.get("sources", []),
+                        feedback="like",
+                        session_id=st.session_state.conversation_id
+                    )
+                    st.toast("感谢反馈 🙏")
+            with fb_col2:
+                if st.button("👎", key=f"dislike_{idx}", help="需改进"):
+                    prev_question = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
+                    log_conversation(
+                        prev_question,
+                        message["content"],
+                        message.get("sources", []),
+                        feedback="dislike",
+                        session_id=st.session_state.conversation_id
+                    )
+                    st.toast("感谢反馈，我会努力改进")
         
         with col2:
-            if st.button("📋", key=f"copy_{idx}"):
+            if st.button("📋", key=f"copy_{idx}", help="复制回答"):
                 js = f"navigator.clipboard.writeText(`{message['content']}`);"
                 st.components.v1.html(f"<script>{js}</script>", height=0)
                 st.toast("已复制")
+        
+        # 来源
+        if "sources" in message and message["sources"]:
+            with st.expander("📚 来源"):
+                for i, source in enumerate(message["sources"], 1):
+                    st.markdown(f"""
+                    <div class="source-item">
+                        <span>📄</span> {source[:150]}...
+                    </div>
+                    """, unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -506,17 +453,14 @@ with col2:
     send_button = st.button("发送", use_container_width=True)
 
 if (send_button or user_input) and user_input and not st.session_state.is_loading:
-    st.session_state.messages.append({
-        "role": "user", 
-        "content": user_input
-    })
+    st.session_state.messages.append({"role": "user", "content": user_input})
     st.session_state.input_key += 1
     st.session_state.is_loading = True
     st.rerun()
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ========== 加载动画 ==========
+# ========== 加载动画和AI回答 ==========
 if st.session_state.is_loading:
     last_message = st.session_state.messages[-1]
     
@@ -528,7 +472,7 @@ if st.session_state.is_loading:
                 <div class="loading-dot"></div>
                 <div class="loading-dot"></div>
             </div>
-            <span class="loading-text">医小管正在输入</span>
+            <span style="color: #666; font-size: 0.8rem;">医小管正在输入</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -548,19 +492,31 @@ if st.session_state.is_loading:
         new_conversation_id = None
         sources = []
     
+    # 添加引导语
+    reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
+    
     if new_conversation_id:
         st.session_state.conversation_id = new_conversation_id
     
+    log_conversation(
+        last_message["content"],
+        reply,
+        sources,
+        session_id=st.session_state.conversation_id
+    )
+    
     st.session_state.is_loading = False
     
-    message_data = {
-        "role": "assistant",
-        "content": reply
-    }
-    
+    message_data = {"role": "assistant", "content": reply}
     if sources:
         message_data["sources"] = sources
     
     st.session_state.messages.append(message_data)
-    
     st.rerun()
+
+# ========== 隐私提示 - 底部小字 ==========
+st.markdown("""
+<div class="privacy-note">
+    🛡️ 对话仅保存在本地 · 不上传个人信息 · 可随时清空
+</div>
+""", unsafe_allow_html=True)
