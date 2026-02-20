@@ -4,7 +4,7 @@ import re
 import csv
 import os
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from llm_service import LLMService
 
 # ========== 页面配置 ==========
@@ -368,11 +368,12 @@ st.markdown('<div class="chat-container">', unsafe_allow_html=True)
 
 for idx, message in enumerate(st.session_state.messages):
     if message["role"] == "user":
+        # ===== 修改1：用户消息时间戳 =====
         st.markdown(f"""
         <div class="message-row user">
             <div class="message-bubble user">
                 <div class="message-content">{message["content"]}</div>
-                <div class="timestamp">{datetime.now().strftime("%H:%M")}</div>
+                <div class="timestamp">{(datetime.utcnow() + timedelta(hours=8)).strftime("%H:%M")}</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -380,12 +381,12 @@ for idx, message in enumerate(st.session_state.messages):
         # ===== 强制换行处理 =====
         formatted_content = format_with_line_breaks(message["content"])
         
-        # AI消息主体
+        # ===== 修改2：AI消息时间戳 =====
         st.markdown(f"""
         <div class="message-row assistant">
             <div class="message-bubble assistant">
                 <div class="message-content">{formatted_content}</div>
-                <div class="timestamp">{datetime.now().strftime("%H:%M")}</div>
+                <div class="timestamp">{(datetime.utcnow() + timedelta(hours=8)).strftime("%H:%M")}</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
