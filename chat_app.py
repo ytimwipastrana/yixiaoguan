@@ -284,51 +284,6 @@ st.markdown("""
         background: #1A1A1A !important;
     }
     
-    /* 思考动画样式 */
-    .thinking-container {
-        display: flex;
-        justify-content: flex-start;
-        margin: 1rem 0;
-        animation: fadeIn 0.3s ease;
-    }
-    
-    .thinking-bubble {
-        background: #0F0F0F;
-        border: 1px solid #2A2A2A;
-        border-radius: 1.2rem;
-        padding: 1rem 1.4rem;
-        display: flex;
-        align-items: center;
-        gap: 0.8rem;
-        max-width: 80%;
-    }
-    
-    .thinking-dots {
-        display: flex;
-        gap: 0.3rem;
-    }
-    
-    .thinking-dot {
-        width: 0.5rem;
-        height: 0.5rem;
-        background: #666;
-        border-radius: 50%;
-        animation: pulse 1.4s infinite;
-    }
-    
-    .thinking-dot:nth-child(2) {
-        animation-delay: 0.2s;
-    }
-    
-    .thinking-dot:nth-child(3) {
-        animation-delay: 0.4s;
-    }
-    
-    .thinking-text {
-        color: #888;
-        font-size: 0.9rem;
-    }
-    
     /* 隐私提示 - 底部小字 */
     .privacy-note {
         text-align: center;
@@ -343,11 +298,6 @@ st.markdown("""
     @keyframes fadeIn {
         from { opacity: 0; transform: translateY(5px); }
         to { opacity: 1; transform: translateY(0); }
-    }
-    
-    @keyframes pulse {
-        0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
-        30% { transform: translateY(-3px); opacity: 1; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -373,6 +323,7 @@ with st.sidebar:
 # ========== 显示聊天历史 ==========
 st.markdown('<div class="chat-container">', unsafe_allow_html=True)
 
+# 显示所有历史消息
 for idx, message in enumerate(st.session_state.messages):
     if message["role"] == "user":
         st.markdown(f"""
@@ -393,6 +344,7 @@ for idx, message in enumerate(st.session_state.messages):
         </div>
         """, unsafe_allow_html=True)
         
+        # 反馈按钮
         col1, col2 = st.columns([1, 10])
         with col1:
             fb_col1, fb_col2 = st.columns(2)
@@ -425,6 +377,7 @@ for idx, message in enumerate(st.session_state.messages):
                 st.components.v1.html(f"<script>{js}</script>", height=0)
                 st.toast("已复制")
         
+        # 来源
         if "sources" in message and message["sources"]:
             with st.expander("📚 来源"):
                 for i, source in enumerate(message["sources"], 1):
@@ -453,9 +406,9 @@ with col1:
 with col2:
     send_button = st.button("发送", use_container_width=True)
 
-# ========== 发送逻辑 ==========
+# ========== 发送逻辑：用户消息立即出现 ==========
 if (send_button or user_input) and user_input and not st.session_state.is_loading:
-    # 立即添加用户消息
+    # 添加用户消息
     st.session_state.messages.append({"role": "user", "content": user_input})
     st.session_state.input_key += 1
     st.session_state.is_loading = True
@@ -463,64 +416,53 @@ if (send_button or user_input) and user_input and not st.session_state.is_loadin
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ========== AI思考和处理 ==========
+# ========== AI思考动画和回答（在AI消息位置） ==========
 if st.session_state.is_loading:
-    # 获取最后一条用户消息
     last_user_message = st.session_state.messages[-1]["content"]
     
-    # 创建思考动画占位符（在AI消息位置）
-    thinking_placeholder = st.empty()
+    # 在AI消息位置创建容器
+    with st.chat_message("assistant"):
+        # 显示思考动画
+        with st.status("医小管正在思考...", expanded=True) as status:
+            # 调用API
+            result = st.session_state.llm.ask(
+                last_user_message, 
+                st.session_state.conversation_id
+            )
+            
+            if isinstance(result, tuple) and len(result) == 3:
+                reply, new_conversation_id, sources = result
+            elif isinstance(result, tuple) and len(result) == 2:
+                reply, new_conversation_id = result
+                sources = ["回答基于知识库生成"]
+            else:
+                reply = result
+                new_conversation_id = None
+                sources = []
+            
+            if new_conversation_id:
+                st.session_state.conversation_id = new_conversation_id
+            
+            # 添加引导语
+            reply += "\n\n---\n测试阶段，请在下方进行反馈"
+            
+            # 记录日志
+            log_conversation(
+                last_user_message,
+                reply,
+                sources,
+                session_id=st.session_state.conversation_id
+            )
+            
+            # 更新状态
+            status.update(label="医小管思考完成!", state="complete")
+        
+        # 显示答案
+        formatted_reply = format_with_line_breaks(reply)
+        st.markdown(formatted_reply)
     
-    # 显示思考动画
-    thinking_placeholder.markdown("""
-    <div class="thinking-container">
-        <div class="thinking-bubble">
-            <div class="thinking-dots">
-                <div class="thinking-dot"></div>
-                <div class="thinking-dot"></div>
-                <div class="thinking-dot"></div>
-            </div>
-            <span class="thinking-text">医小管正在思考...</span>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # 调用API
-    result = st.session_state.llm.ask(
-        last_user_message, 
-        st.session_state.conversation_id
-    )
-    
-    if isinstance(result, tuple) and len(result) == 3:
-        reply, new_conversation_id, sources = result
-    elif isinstance(result, tuple) and len(result) == 2:
-        reply, new_conversation_id = result
-        sources = ["回答基于知识库生成"]
-    else:
-        reply = result
-        new_conversation_id = None
-        sources = []
-    
-    if new_conversation_id:
-        st.session_state.conversation_id = new_conversation_id
-    
-    # 添加引导语
-    reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
-    
-    # 记录日志
-    log_conversation(
-        last_user_message,
-        reply,
-        sources,
-        session_id=st.session_state.conversation_id
-    )
-    
-    # 移除思考动画
-    thinking_placeholder.empty()
-    
-    # 添加AI回答
+    # 保存答案到消息历史
     st.session_state.messages.append({"role": "assistant", "content": reply, "sources": sources})
-    
     st.session_state.is_loading = False
     st.rerun()
 
