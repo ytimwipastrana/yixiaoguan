@@ -198,14 +198,6 @@ st.markdown("""
         margin-top: 0.3rem;
     }
     
-    /* 时间戳 - 极淡 */
-    .timestamp {
-        font-size: 0.65rem;
-        color: #444;
-        margin-top: 0.5rem;
-        text-align: right;
-    }
-    
     /* 反馈按钮区域 - 极简 */
     .feedback-container {
         display: flex;
@@ -368,12 +360,12 @@ st.markdown('<div class="chat-container">', unsafe_allow_html=True)
 
 for idx, message in enumerate(st.session_state.messages):
     if message["role"] == "user":
-        # ===== 修改1：用户消息时间戳 =====
+        # 用户消息 - 移除时间戳
         st.markdown(f"""
         <div class="message-row user">
             <div class="message-bubble user">
                 <div class="message-content">{message["content"]}</div>
-                <div class="timestamp">{(datetime.utcnow() + timedelta(hours=8)).strftime("%H:%M")}</div>
+                <!-- 时间戳已移除 -->
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -381,12 +373,12 @@ for idx, message in enumerate(st.session_state.messages):
         # ===== 强制换行处理 =====
         formatted_content = format_with_line_breaks(message["content"])
         
-        # ===== 修改2：AI消息时间戳 =====
+        # AI消息主体 - 移除时间戳
         st.markdown(f"""
         <div class="message-row assistant">
             <div class="message-bubble assistant">
                 <div class="message-content">{formatted_content}</div>
-                <div class="timestamp">{(datetime.utcnow() + timedelta(hours=8)).strftime("%H:%M")}</div>
+                <!-- 时间戳已移除 -->
             </div>
         </div>
         """, unsafe_allow_html=True)
