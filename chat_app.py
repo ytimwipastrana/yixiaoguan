@@ -3,6 +3,7 @@ import time
 import re
 import csv
 import os
+import pandas as pd
 from datetime import datetime
 from llm_service import LLMService
 
@@ -13,10 +14,23 @@ st.set_page_config(
     layout="centered"
 )
 
-# ========== 初始化 ==========
+# ========== 极简初始化 ==========
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "👋 你好，我是医小管\n\n你的专属AI辅导员"}
+        {
+            "role": "assistant", 
+            "content": """👋 你好，我是医小管
+
+你的专属AI辅导员
+
+---
+
+💡 试试问我：
+• 奖学金怎么申请？
+• 医保报销比例？
+• 考研有什么要求？
+• 选课系统怎么进？"""
+        }
     ]
 
 if "llm" not in st.session_state:
@@ -25,80 +39,338 @@ if "llm" not in st.session_state:
 if "conversation_id" not in st.session_state:
     st.session_state.conversation_id = None
 
-# ========== 日志记录 ==========
-def log_conversation(question, answer, feedback=None):
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+
+# ========== 日志记录函数 ==========
+def log_conversation(question, answer, sources, feedback=None, session_id=None):
+    """记录对话日志，用于后续分析"""
     log_file = "evolution_logs.csv"
+    
     try:
         if not os.path.exists(log_file):
             with open(log_file, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(['时间', '问题', '回答', '反馈'])
+                writer.writerow([
+                    '时间', '会话ID', '问题', '回答', '回答长度', 
+                    '来源数量', '用户反馈', '响应时间(ms)', '是否成功'
+                ])
+        
+        is_success = len(sources) > 0 and len(answer) > 20
         
         with open(log_file, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                question[:100],
-                answer[:100],
-                feedback or ''
+                session_id or '',
+                question[:100] + '...' if len(question) > 100 else question,
+                answer[:200] + '...' if len(answer) > 200 else answer,
+                len(answer),
+                len(sources) if sources else 0,
+                feedback or '',
+                int((time.time() % 1) * 1000),
+                is_success
             ])
-    except:
-        pass
+    except Exception as e:
+        print(f"日志记录失败: {e}")
 
-# ========== 显示消息 ==========
-st.title("🩺 医小管")
+# ========== 强制换行函数 ==========
+def format_with_line_breaks(text):
+    """强制处理换行"""
+    if not text:
+        return text
+    
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    text = text.replace('。', '。\n')
+    text = text.replace('？', '？\n')
+    text = text.replace('！', '！\n')
+    text = text.replace('；', '；\n')
+    text = text.replace('：', '：\n')
+    
+    text = re.sub(r'(\d+\.)', r'\n\1', text)
+    text = re.sub(r'([一二三四五六七八九十])[、.]', r'\n\1、', text)
+    text = re.sub(r'（(\d+)）', r'\n（\1）', text)
+    text = re.sub(r'\n\s*\n', '\n\n', text)
+    
+    lines = text.split('\n')
+    formatted = '<br>'.join(lines)
+    
+    return formatted
 
-# 显示所有历史消息
-for idx, msg in enumerate(st.session_state.messages):
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+# ========== 极简CSS（保留所有样式） ==========
+st.markdown("""
+<style>
+    .stApp { background: #0A0A0A; }
+    #MainMenu, footer, header {visibility: hidden;}
+    
+    .title { text-align: center; font-size: 2rem; color: #FFFFFF; margin-bottom: 2rem; }
+    .title span { color: #666; font-size: 0.9rem; display: block; }
+    
+    .chat-container { max-width: 700px; margin: 0 auto; padding-bottom: 80px; }
+    
+    .message-row { display: flex; margin: 1.5rem 0; }
+    .message-row.user { justify-content: flex-end; }
+    .message-row.assistant { justify-content: flex-start; }
+    
+    .message-bubble {
+        max-width: 80%;
+        padding: 1rem 1.4rem;
+        border-radius: 1.2rem;
+        line-height: 1.6;
+        font-size: 0.95rem;
+        word-wrap: break-word;
+    }
+    
+    .message-bubble.user { background: #1E1E1E; color: #FFFFFF; border: 1px solid #333; }
+    .message-bubble.assistant { background: #0F0F0F; color: #E0E0E0; border: 1px solid #2A2A2A; }
+    
+    .message-content { white-space: pre-wrap; }
+    .message-content br { display: block; margin-top: 0.3rem; }
+    
+    .thinking-bubble {
+        background: #0F0F0F;
+        border: 1px solid #2A2A2A;
+        border-radius: 1.2rem;
+        padding: 1rem 1.4rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.8rem;
+        max-width: 80%;
+    }
+    
+    .thinking-dots { display: flex; gap: 0.3rem; }
+    .thinking-dot {
+        width: 0.5rem; height: 0.5rem;
+        background: #666;
+        border-radius: 50%;
+        animation: pulse 1.4s infinite;
+    }
+    .thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+    .thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+    .thinking-text { color: #888; font-size: 0.9rem; }
+    
+    .source-item {
+        background: #0A0A0A;
+        padding: 0.5rem 0.8rem;
+        border-radius: 0.5rem;
+        margin: 0.3rem 0;
+        color: #666;
+        border-left: 2px solid #333;
+        font-size: 0.8rem;
+    }
+    
+    .input-section {
+        max-width: 700px;
+        margin: 0 auto;
+        padding: 1rem;
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        background: #0A0A0A;
+        border-top: 1px solid #333;
+    }
+    
+    .stTextInput input {
+        background: #0F0F0F !important;
+        border: 1px solid #2A2A2A !important;
+        border-radius: 2rem !important;
+        padding: 0.8rem 1.2rem !important;
+        color: #FFFFFF !important;
+    }
+    
+    .stTextInput input:focus { border-color: #1976d2 !important; }
+    .stTextInput input::placeholder { color: #444 !important; }
+    
+    .stButton > button {
+        background: #1A1A1A !important;
+        border: 1px solid #333 !important;
+        border-radius: 2rem !important;
+        color: #CCC !important;
+        transition: all 0.2s !important;
+    }
+    
+    .stButton > button:hover:not(:disabled) {
+        border-color: #1976d2 !important;
+        color: #1976d2 !important;
+    }
+    
+    .privacy-note {
+        text-align: center;
+        color: #333;
+        font-size: 0.7rem;
+        margin: 1rem 0;
+        padding: 1rem;
+    }
+    
+    @keyframes pulse {
+        0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+        30% { transform: translateY(-3px); opacity: 1; }
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ========== 标题 ==========
+st.markdown("""
+<div class="title">
+    🩺 医小管
+    <span>AI辅导员 · 测试版</span>
+</div>
+""", unsafe_allow_html=True)
+
+# ========== 侧边栏 ==========
+with st.sidebar:
+    st.markdown("### ⚡")
+    if st.button("🗑️ 清空对话", use_container_width=True):
+        st.session_state.messages = [
+            {"role": "assistant", "content": "👋 你好，我是医小管\n\n**你的专属AI辅导员**"}
+        ]
+        st.session_state.conversation_id = None
+        st.session_state.processing = False
+        st.rerun()
+
+# ========== 显示聊天历史 ==========
+st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+
+for idx, message in enumerate(st.session_state.messages):
+    if message["role"] == "user":
+        st.markdown(f"""
+        <div class="message-row user">
+            <div class="message-bubble user">
+                <div class="message-content">{message["content"]}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        formatted_content = format_with_line_breaks(message["content"])
         
-        # 如果是AI消息，添加反馈按钮
-        if msg["role"] == "assistant" and idx > 0:
-            col1, col2, col3 = st.columns([1, 1, 8])
-            with col1:
-                if st.button("👍", key=f"like_{idx}"):
-                    prev_q = st.session_state.messages[idx-1]["content"]
-                    log_conversation(prev_q, msg["content"], "like")
-                    st.toast("感谢反馈 🙏")
-            with col2:
-                if st.button("👎", key=f"dislike_{idx}"):
-                    prev_q = st.session_state.messages[idx-1]["content"]
-                    log_conversation(prev_q, msg["content"], "dislike")
-                    st.toast("感谢反馈 🙏")
-            with col3:
-                if st.button("📋", key=f"copy_{idx}"):
-                    st.toast("已复制")
+        st.markdown(f"""
+        <div class="message-row assistant">
+            <div class="message-bubble assistant">
+                <div class="message-content">{formatted_content}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 反馈按钮
+        col1, col2, col3 = st.columns([1, 1, 8])
+        with col1:
+            if st.button("👍", key=f"like_{idx}"):
+                prev_question = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
+                log_conversation(
+                    prev_question,
+                    message["content"],
+                    message.get("sources", []),
+                    feedback="like",
+                    session_id=st.session_state.conversation_id
+                )
+                st.toast("👍 感谢反馈")
+        with col2:
+            if st.button("👎", key=f"dislike_{idx}"):
+                prev_question = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
+                log_conversation(
+                    prev_question,
+                    message["content"],
+                    message.get("sources", []),
+                    feedback="dislike",
+                    session_id=st.session_state.conversation_id
+                )
+                st.toast("👎 感谢反馈")
+        with col3:
+            if st.button("📋", key=f"copy_{idx}"):
+                js = f"navigator.clipboard.writeText(`{message['content']}`);"
+                st.components.v1.html(f"<script>{js}</script>", height=0)
+                st.toast("已复制")
+        
+        # 来源
+        if "sources" in message and message["sources"]:
+            with st.expander("📚 来源"):
+                for i, source in enumerate(message["sources"], 1):
+                    st.markdown(f"""
+                    <div class="source-item">
+                        <span>📄</span> {source[:150]}...
+                    </div>
+                    """, unsafe_allow_html=True)
 
-# ========== 输入 ==========
-prompt = st.chat_input("输入你的问题...")
+st.markdown('</div>', unsafe_allow_html=True)
 
-# ========== 处理 ==========
-if prompt:
-    # 显示用户消息
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    
-    # 获取AI回答
-    with st.chat_message("assistant"):
-        with st.spinner("医小管正在思考..."):
-            result = st.session_state.llm.ask(prompt, st.session_state.conversation_id)
-            
-            if isinstance(result, tuple) and len(result) >= 2:
-                reply = result[0]
-                if len(result) >= 2:
-                    st.session_state.conversation_id = result[1]
-            else:
-                reply = str(result)
-            
-            # 添加引导语
-            reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。"
-            
-            st.markdown(reply)
-    
-    # 保存回答
-    st.session_state.messages.append({"role": "assistant", "content": reply})
-    log_conversation(prompt, reply)
-    
+# ========== 输入区域 ==========
+st.markdown('<div class="input-section">', unsafe_allow_html=True)
+
+col1, col2 = st.columns([6, 1])
+
+with col1:
+    user_input = st.text_input(
+        "",
+        placeholder="输入你的问题..." if not st.session_state.processing else "正在处理中，请稍候...",
+        label_visibility="collapsed",
+        key=f"input_{len(st.session_state.messages)}",
+        disabled=st.session_state.processing
+    )
+
+with col2:
+    send_button = st.button(
+        "发送", 
+        use_container_width=True,
+        disabled=st.session_state.processing
+    )
+
+# ========== 处理发送 ==========
+if (send_button or user_input) and user_input and not st.session_state.processing:
+    # 1. 立即添加用户消息
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state.processing = True
     st.rerun()
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ========== 处理AI回答 ==========
+if st.session_state.processing:
+    last_message = st.session_state.messages[-1]
+    if last_message["role"] == "user":
+        question = last_message["content"]
+        
+        # 显示思考动画
+        with st.chat_message("assistant"):
+            with st.spinner("医小管正在思考..."):
+                result = st.session_state.llm.ask(question, st.session_state.conversation_id)
+                
+                if isinstance(result, tuple) and len(result) == 3:
+                    reply, new_conversation_id, sources = result
+                elif isinstance(result, tuple) and len(result) == 2:
+                    reply, new_conversation_id = result
+                    sources = ["回答基于知识库生成"]
+                else:
+                    reply = result
+                    new_conversation_id = None
+                    sources = []
+                
+                if new_conversation_id:
+                    st.session_state.conversation_id = new_conversation_id
+                
+                # 添加引导语
+                reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
+                
+                # 记录日志
+                log_conversation(
+                    question,
+                    reply,
+                    sources,
+                    session_id=st.session_state.conversation_id
+                )
+                
+                # 显示回答
+                formatted_reply = format_with_line_breaks(reply)
+                st.markdown(formatted_reply)
+        
+        # 保存回答
+        st.session_state.messages.append({"role": "assistant", "content": reply, "sources": sources})
+        st.session_state.processing = False
+        st.rerun()
+
+# ========== 隐私提示 ==========
+st.markdown("""
+<div class="privacy-note">
+    🛡️ 对话仅保存在本地 · 不上传个人信息 · 可随时清空
+</div>
+""", unsafe_allow_html=True)
