@@ -4,7 +4,7 @@ import re
 import csv
 import os
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from llm_service import LLMService
 
 # ========== 页面配置 ==========
@@ -284,34 +284,49 @@ st.markdown("""
         background: #1A1A1A !important;
     }
     
-    /* 加载动画 - 极简 */
-    .loading-container {
+    /* 思考动画容器 */
+    .thinking-container {
         display: flex;
         justify-content: flex-start;
         margin: 1rem 0;
+        animation: fadeIn 0.3s ease;
     }
     
-    .loading-indicator {
+    .thinking-bubble {
+        background: #0F0F0F;
+        border: 1px solid #2A2A2A;
+        border-radius: 1.5rem;
+        padding: 1rem 1.5rem;
         display: flex;
         align-items: center;
-        gap: 0.5rem;
-        padding: 0.5rem 1rem;
-        background: #0F0F0F;
-        border-radius: 2rem;
-        border: 1px solid #2A2A2A;
+        gap: 0.8rem;
     }
     
-    .loading-dots {
+    .thinking-dots {
         display: flex;
-        gap: 0.2rem;
+        gap: 0.3rem;
     }
     
-    .loading-dot {
-        width: 0.4rem;
-        height: 0.4rem;
+    .thinking-dot {
+        width: 0.5rem;
+        height: 0.5rem;
         background: #666;
         border-radius: 50%;
         animation: pulse 1.4s infinite;
+    }
+    
+    .thinking-dot:nth-child(2) {
+        animation-delay: 0.2s;
+    }
+    
+    .thinking-dot:nth-child(3) {
+        animation-delay: 0.4s;
+    }
+    
+    .thinking-text {
+        color: #888;
+        font-size: 0.9rem;
+        letter-spacing: 0.3px;
     }
     
     /* 隐私提示 - 底部小字 */
@@ -360,30 +375,24 @@ st.markdown('<div class="chat-container">', unsafe_allow_html=True)
 
 for idx, message in enumerate(st.session_state.messages):
     if message["role"] == "user":
-        # 用户消息 - 移除时间戳
         st.markdown(f"""
         <div class="message-row user">
             <div class="message-bubble user">
                 <div class="message-content">{message["content"]}</div>
-                <!-- 时间戳已移除 -->
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        # ===== 强制换行处理 =====
         formatted_content = format_with_line_breaks(message["content"])
         
-        # AI消息主体 - 移除时间戳
         st.markdown(f"""
         <div class="message-row assistant">
             <div class="message-bubble assistant">
                 <div class="message-content">{formatted_content}</div>
-                <!-- 时间戳已移除 -->
             </div>
         </div>
         """, unsafe_allow_html=True)
         
-        # ===== 反馈按钮区域 =====
         col1, col2 = st.columns([1, 10])
         with col1:
             fb_col1, fb_col2 = st.columns(2)
@@ -397,7 +406,7 @@ for idx, message in enumerate(st.session_state.messages):
                         feedback="like",
                         session_id=st.session_state.conversation_id
                     )
-                    st.toast("感谢反馈 🙏")
+                    st.toast("👍 感谢反馈")
             with fb_col2:
                 if st.button("👎", key=f"dislike_{idx}", help="需改进"):
                     prev_question = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
@@ -408,7 +417,7 @@ for idx, message in enumerate(st.session_state.messages):
                         feedback="dislike",
                         session_id=st.session_state.conversation_id
                     )
-                    st.toast("感谢反馈，我会努力改进")
+                    st.toast("👎 感谢反馈，我会努力改进")
         
         with col2:
             if st.button("📋", key=f"copy_{idx}", help="复制回答"):
@@ -416,7 +425,6 @@ for idx, message in enumerate(st.session_state.messages):
                 st.components.v1.html(f"<script>{js}</script>", height=0)
                 st.toast("已复制")
         
-        # 来源
         if "sources" in message and message["sources"]:
             with st.expander("📚 来源"):
                 for i, source in enumerate(message["sources"], 1):
@@ -445,6 +453,7 @@ with col1:
 with col2:
     send_button = st.button("发送", use_container_width=True)
 
+# 处理发送 - 立即反馈
 if (send_button or user_input) and user_input and not st.session_state.is_loading:
     st.session_state.messages.append({"role": "user", "content": user_input})
     st.session_state.input_key += 1
@@ -453,25 +462,28 @@ if (send_button or user_input) and user_input and not st.session_state.is_loadin
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ========== 加载动画和AI回答 ==========
+# ========== 思考动画和AI回答 ==========
 if st.session_state.is_loading:
-    last_message = st.session_state.messages[-1]
+    last_user_message = st.session_state.messages[-1]["content"]
     
-    st.markdown("""
-    <div class="loading-container">
-        <div class="loading-indicator">
-            <div class="loading-dots">
-                <div class="loading-dot"></div>
-                <div class="loading-dot"></div>
-                <div class="loading-dot"></div>
+    # 显示思考动画
+    thinking_placeholder = st.empty()
+    thinking_placeholder.markdown("""
+    <div class="thinking-container">
+        <div class="thinking-bubble">
+            <div class="thinking-dots">
+                <div class="thinking-dot"></div>
+                <div class="thinking-dot"></div>
+                <div class="thinking-dot"></div>
             </div>
-            <span style="color: #666; font-size: 0.8rem;">医小管正在输入</span>
+            <span class="thinking-text">医小管正在思考...</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
     
+    # 调用 API
     result = st.session_state.llm.ask(
-        last_message["content"], 
+        last_user_message, 
         st.session_state.conversation_id
     )
     
@@ -485,26 +497,32 @@ if st.session_state.is_loading:
         new_conversation_id = None
         sources = []
     
-    # 添加引导语
-    reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
-    
     if new_conversation_id:
         st.session_state.conversation_id = new_conversation_id
     
+    # 添加引导语
+    reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
+    
+    # 记录日志
     log_conversation(
-        last_message["content"],
+        last_user_message,
         reply,
         sources,
         session_id=st.session_state.conversation_id
     )
     
-    st.session_state.is_loading = False
+    # 移除思考动画
+    thinking_placeholder.empty()
+    
+    # 显示AI回答
+    formatted_reply = format_with_line_breaks(reply)
     
     message_data = {"role": "assistant", "content": reply}
     if sources:
         message_data["sources"] = sources
-    
     st.session_state.messages.append(message_data)
+    
+    st.session_state.is_loading = False
     st.rerun()
 
 # ========== 隐私提示 - 底部小字 ==========
