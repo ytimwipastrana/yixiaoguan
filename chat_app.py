@@ -15,12 +15,16 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ========== 初始化会话状态 ==========
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "assistant", 
-            "content": """👋 你好，我是医小管
+# ========== 初始化会话状态（全部集中管理） ==========
+def init_session_state():
+    """统一初始化所有会话状态，避免重复创建"""
+    
+    # 消息历史
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {
+                "role": "assistant", 
+                "content": """👋 你好，我是医小管
 
 你的专属AI辅导员
 
@@ -31,30 +35,41 @@ if "messages" not in st.session_state:
 • 医保报销比例？
 • 考研有什么要求？
 • 选课系统怎么进？"""
-        }
-    ]
+            }
+        ]
+    
+    # 核心服务
+    if "llm" not in st.session_state:
+        st.session_state.llm = LLMService()
+    
+    if "conversation_id" not in st.session_state:
+        st.session_state.conversation_id = None
+    
+    # 输入控制
+    if "input_key" not in st.session_state:
+        st.session_state.input_key = 0
+    
+    # ===== 状态机控制（关键） =====
+    if "app_state" not in st.session_state:
+        st.session_state.app_state = "idle"  # idle, thinking, waiting
+    
+    if "pending_question" not in st.session_state:
+        st.session_state.pending_question = None
+    
+    if "pending_reply" not in st.session_state:
+        st.session_state.pending_reply = None
+    
+    if "pending_sources" not in st.session_state:
+        st.session_state.pending_sources = None
+    
+    if "request_timestamp" not in st.session_state:
+        st.session_state.request_timestamp = None
+    
+    # 防止重复提交的锁
+    if "processing_lock" not in st.session_state:
+        st.session_state.processing_lock = False
 
-if "llm" not in st.session_state:
-    st.session_state.llm = LLMService()
-
-if "conversation_id" not in st.session_state:
-    st.session_state.conversation_id = None
-
-if "input_key" not in st.session_state:
-    st.session_state.input_key = 0
-
-# ========== 新增：用于控制思考动画和待回复 ==========
-if "is_thinking" not in st.session_state:
-    st.session_state.is_thinking = False
-
-if "thinking_question" not in st.session_state:
-    st.session_state.thinking_question = None
-
-if "pending_reply" not in st.session_state:
-    st.session_state.pending_reply = None
-
-if "pending_sources" not in st.session_state:
-    st.session_state.pending_sources = None
+init_session_state()
 
 # ========== 日志记录函数 ==========
 def log_conversation(question, answer, sources, feedback=None, session_id=None):
@@ -376,28 +391,76 @@ st.markdown("""
 with st.sidebar:
     st.markdown("### ⚡")
     if st.button("🗑️", help="清空对话"):
+        # 重置所有状态
         st.session_state.messages = [
             {"role": "assistant", "content": "👋 你好，我是医小管\n\n**你的专属AI辅导员**"}
         ]
         st.session_state.conversation_id = None
-        st.session_state.is_thinking = False
-        st.session_state.thinking_question = None
+        st.session_state.app_state = "idle"
+        st.session_state.pending_question = None
         st.session_state.pending_reply = None
         st.session_state.pending_sources = None
+        st.session_state.processing_lock = False
         st.rerun()
 
-# ========== 处理待处理的回复 ==========
-if st.session_state.pending_reply and not st.session_state.is_thinking:
-    # 添加AI回答到历史
+# ========== 状态机处理 ==========
+
+# 1. 如果有待处理的回复，先添加到消息历史
+if st.session_state.pending_reply and st.session_state.app_state == "idle":
     st.session_state.messages.append({
         "role": "assistant", 
         "content": st.session_state.pending_reply,
         "sources": st.session_state.pending_sources
     })
-    
-    # 清空待处理
     st.session_state.pending_reply = None
     st.session_state.pending_sources = None
+    st.rerun()
+
+# 2. 如果正在思考，调用API
+if st.session_state.app_state == "thinking" and st.session_state.pending_question:
+    question = st.session_state.pending_question
+    
+    # 调用API（带超时保护）
+    try:
+        result = st.session_state.llm.ask(question, st.session_state.conversation_id)
+        
+        if isinstance(result, tuple) and len(result) == 3:
+            reply, new_conversation_id, sources = result
+        elif isinstance(result, tuple) and len(result) == 2:
+            reply, new_conversation_id = result
+            sources = ["回答基于知识库生成"]
+        else:
+            reply = result
+            new_conversation_id = None
+            sources = []
+        
+        if new_conversation_id:
+            st.session_state.conversation_id = new_conversation_id
+        
+        # 添加引导语
+        reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
+        
+        # 记录日志
+        log_conversation(
+            question,
+            reply,
+            sources,
+            session_id=st.session_state.conversation_id
+        )
+        
+        # 保存待处理回复
+        st.session_state.pending_reply = reply
+        st.session_state.pending_sources = sources
+        
+    except Exception as e:
+        # API调用失败，显示错误信息
+        st.session_state.pending_reply = f"❌ 服务暂时不可用，请稍后再试。错误信息：{str(e)}"
+        st.session_state.pending_sources = []
+    
+    # 无论成功失败，都退出思考状态
+    st.session_state.app_state = "idle"
+    st.session_state.pending_question = None
+    st.session_state.processing_lock = False
     st.rerun()
 
 # ========== 显示聊天历史 ==========
@@ -468,7 +531,7 @@ for idx, message in enumerate(st.session_state.messages):
                     """, unsafe_allow_html=True)
 
 # ========== 如果正在思考，显示思考动画 ==========
-if st.session_state.is_thinking:
+if st.session_state.app_state == "thinking":
     st.markdown("""
     <div class="thinking-container">
         <div class="thinking-bubble">
@@ -487,72 +550,45 @@ st.markdown('</div>', unsafe_allow_html=True)
 # ========== 输入区域 ==========
 st.markdown('<div class="input-section">', unsafe_allow_html=True)
 
+# 根据状态决定是否禁用输入
+input_disabled = st.session_state.app_state != "idle" or st.session_state.processing_lock
+
 col1, col2 = st.columns([6, 1])
 
 with col1:
     input_key = f"user_input_{st.session_state.input_key}"
     user_input = st.text_input(
         "",
-        placeholder="输入你的问题...",
+        placeholder="输入你的问题..." if not input_disabled else "正在处理中，请稍候...",
         label_visibility="collapsed",
-        key=input_key
+        key=input_key,
+        disabled=input_disabled
     )
 
 with col2:
-    send_button = st.button("发送", use_container_width=True)
+    send_button = st.button(
+        "发送", 
+        use_container_width=True,
+        disabled=input_disabled
+    )
 
-# ========== 处理发送 ==========
-if (send_button or user_input) and user_input and not st.session_state.is_thinking:
+# ========== 处理发送（带锁保护） ==========
+if (send_button or user_input) and user_input and not input_disabled:
+    # 上锁，防止重复提交
+    st.session_state.processing_lock = True
+    
     # 1. 立即添加用户消息
     st.session_state.messages.append({"role": "user", "content": user_input})
     st.session_state.input_key += 1
     
     # 2. 设置思考状态
-    st.session_state.is_thinking = True
-    st.session_state.thinking_question = user_input
+    st.session_state.app_state = "thinking"
+    st.session_state.pending_question = user_input
+    
+    # 3. 刷新页面
     st.rerun()
 
 st.markdown('</div>', unsafe_allow_html=True)
-
-# ========== 处理AI思考 ==========
-if st.session_state.is_thinking and st.session_state.thinking_question:
-    question = st.session_state.thinking_question
-    
-    # 调用API
-    result = st.session_state.llm.ask(question, st.session_state.conversation_id)
-    
-    if isinstance(result, tuple) and len(result) == 3:
-        reply, new_conversation_id, sources = result
-    elif isinstance(result, tuple) and len(result) == 2:
-        reply, new_conversation_id = result
-        sources = ["回答基于知识库生成"]
-    else:
-        reply = result
-        new_conversation_id = None
-        sources = []
-    
-    if new_conversation_id:
-        st.session_state.conversation_id = new_conversation_id
-    
-    # 添加引导语
-    reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
-    
-    # 记录日志
-    log_conversation(
-        question,
-        reply,
-        sources,
-        session_id=st.session_state.conversation_id
-    )
-    
-    # 保存待处理回复
-    st.session_state.pending_reply = reply
-    st.session_state.pending_sources = sources
-    
-    # 关闭思考状态
-    st.session_state.is_thinking = False
-    st.session_state.thinking_question = None
-    st.rerun()
 
 # ========== 隐私提示 ==========
 st.markdown("""
