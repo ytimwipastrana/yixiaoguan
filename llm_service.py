@@ -1,6 +1,7 @@
 """
 大模型服务 - 调用千帆Agent
 支持重试、缓存、稳定性优化和自我进化数据收集
+添加延时控制以避免QPS超限
 """
 
 import requests
@@ -8,6 +9,7 @@ import re
 import streamlit as st
 import json
 import time
+import random
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -26,6 +28,11 @@ class LLMService:
             # 创建带重试机制的会话
             self.session = self._create_retry_session()
             
+            # 延时控制参数
+            self.min_delay = 0.3  # 最小延时（秒）
+            self.max_delay = 0.7  # 最大延时（秒）
+            self.last_request_time = 0  # 上次请求时间
+            
         except Exception as e:
             st.error(f"❌ 初始化失败: {e}")
             self.api_key = None
@@ -43,13 +50,37 @@ class LLMService:
             read=retries,
             connect=retries,
             backoff_factor=backoff_factor,
-            status_forcelist=[500, 502, 503, 504],  # 遇到这些HTTP状态码时重试
+            status_forcelist=[429, 500, 502, 503, 504],  # 遇到这些HTTP状态码时重试（包括429限流）
             allowed_methods=["POST"]
         )
         adapter = HTTPAdapter(max_retries=retry)
         session.mount('http://', adapter)
         session.mount('https://', adapter)
         return session
+    
+    def _apply_rate_limit(self):
+        """
+        应用速率限制，确保每秒请求不超过指定数量
+        使用随机延时避免固定间隔导致的请求堆积
+        """
+        current_time = time.time()
+        
+        # 计算自上次请求以来的时间差
+        time_since_last = current_time - self.last_request_time
+        
+        # 目标请求间隔（平均每秒2次请求 = 0.5秒间隔）
+        target_interval = 0.5
+        
+        # 如果距离上次请求太近，需要等待
+        if time_since_last < target_interval:
+            wait_time = target_interval - time_since_last
+            # 添加随机抖动，避免固定间隔
+            jitter = random.uniform(-0.1, 0.1)
+            wait_time = max(0, wait_time + jitter)
+            time.sleep(wait_time)
+        
+        # 更新上次请求时间
+        self.last_request_time = time.time()
     
     def _clean_answer(self, answer):
         """清理回答中的引用标记"""
@@ -78,6 +109,9 @@ class LLMService:
         """
         if not self.api_key:
             return "API Key未配置", None, []
+        
+        # ===== 关键修改：应用速率限制 =====
+        self._apply_rate_limit()
         
         # 构建请求头
         headers = {
@@ -156,15 +190,24 @@ class LLMService:
                     
                     return cleaned_answer, new_conversation_id, sources
                     
-                elif response.status_code in [429, 500, 502, 503, 504]:
-                    # 这些错误值得重试
+                elif response.status_code == 429:
+                    # 限流错误，需要更长等待
                     if attempt < max_retries - 1:
-                        wait_time = 2 ** attempt  # 指数退避：1, 2, 4秒
+                        wait_time = (2 ** (attempt + 2))  # 4, 8, 16秒
+                        print(f"⚠️ 触发限流，等待 {wait_time} 秒后重试...")
                         time.sleep(wait_time)
                         continue
                     else:
-                        error_msg = f"服务暂时不可用，请稍后再试 (HTTP {response.status_code})"
-                        return error_msg, None, []
+                        return "服务暂时繁忙，请稍后再试 (限流)", None, []
+                        
+                elif response.status_code in [500, 502, 503, 504]:
+                    # 服务器错误
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        return f"服务暂时不可用，请稍后再试 (HTTP {response.status_code})", None, []
                 else:
                     error_msg = f"API调用失败: HTTP {response.status_code}"
                     try:
