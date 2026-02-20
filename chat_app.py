@@ -4,8 +4,10 @@ import re
 import csv
 import os
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from llm_service import LLMService
+import threading
+import queue
 
 # ========== 页面配置 ==========
 st.set_page_config(
@@ -15,9 +17,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ========== 初始化会话状态（全部集中管理） ==========
+# ========== 初始化会话状态（极简设计） ==========
 def init_session_state():
-    """统一初始化所有会话状态，避免重复创建"""
+    """初始化所有状态"""
     
     # 消息历史
     if "messages" not in st.session_state:
@@ -49,25 +51,16 @@ def init_session_state():
     if "input_key" not in st.session_state:
         st.session_state.input_key = 0
     
-    # ===== 状态机控制（关键） =====
-    if "app_state" not in st.session_state:
-        st.session_state.app_state = "idle"  # idle, thinking, waiting
+    # 处理状态 - 用最简单的布尔值
+    if "processing" not in st.session_state:
+        st.session_state.processing = False
     
     if "pending_question" not in st.session_state:
         st.session_state.pending_question = None
     
-    if "pending_reply" not in st.session_state:
-        st.session_state.pending_reply = None
-    
-    if "pending_sources" not in st.session_state:
-        st.session_state.pending_sources = None
-    
-    if "request_timestamp" not in st.session_state:
-        st.session_state.request_timestamp = None
-    
-    # 防止重复提交的锁
-    if "processing_lock" not in st.session_state:
-        st.session_state.processing_lock = False
+    # 结果队列（用于异步处理）
+    if "result_queue" not in st.session_state:
+        st.session_state.result_queue = queue.Queue()
 
 init_session_state()
 
@@ -105,89 +98,41 @@ def log_conversation(question, answer, sources, feedback=None, session_id=None):
 
 # ========== 强制换行函数 ==========
 def format_with_line_breaks(text):
-    """
-    强制处理换行，确保AI回答中的每个句子都能正确换行
-    """
+    """强制处理换行"""
     if not text:
         return text
     
-    # 1. 处理各种换行符
     text = text.replace('\r\n', '\n').replace('\r', '\n')
-    
-    # 2. 在中文标点符号后添加换行
     text = text.replace('。', '。\n')
     text = text.replace('？', '？\n')
     text = text.replace('！', '！\n')
     text = text.replace('；', '；\n')
     text = text.replace('：', '：\n')
     
-    # 3. 在数字序号前添加换行（如 1. 2. 3. 或 一、二、三）
     text = re.sub(r'(\d+\.)', r'\n\1', text)
     text = re.sub(r'([一二三四五六七八九十])[、.]', r'\n\1、', text)
-    
-    # 4. 处理括号内的序号
     text = re.sub(r'（(\d+)）', r'\n（\1）', text)
-    
-    # 5. 将连续的换行符替换为单个换行
     text = re.sub(r'\n\s*\n', '\n\n', text)
     
-    # 6. 最后将换行符转换为HTML的<br>标签
     lines = text.split('\n')
     formatted = '<br>'.join(lines)
     
     return formatted
 
-# ========== 极简CSS（高级感） ==========
+# ========== 极简CSS ==========
 st.markdown("""
 <style>
-    /* 全局样式 - 极简高级 */
-    .stApp {
-        background: #0A0A0A;
-    }
+    .stApp { background: #0A0A0A; }
+    #MainMenu, footer, header {visibility: hidden;}
     
-    /* 隐藏默认元素 */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
+    .title { text-align: center; font-size: 2rem; color: #FFFFFF; margin-bottom: 2rem; }
+    .title span { color: #666; font-size: 0.9rem; display: block; }
     
-    /* 标题 - 极简 */
-    .title {
-        text-align: center;
-        font-size: 2rem;
-        font-weight: 400;
-        color: #FFFFFF;
-        margin-bottom: 2rem;
-        letter-spacing: 1px;
-    }
+    .chat-container { max-width: 700px; margin: 0 auto; padding-bottom: 80px; }
     
-    .title span {
-        color: #666;
-        font-size: 0.9rem;
-        display: block;
-        font-weight: 300;
-    }
-    
-    /* 聊天容器 */
-    .chat-container {
-        max-width: 700px;
-        margin: 0 auto;
-        padding-bottom: 100px;
-    }
-    
-    /* 消息行 */
-    .message-row {
-        display: flex;
-        margin: 1.5rem 0;
-        animation: fadeIn 0.3s ease;
-    }
-    
-    .message-row.user {
-        justify-content: flex-end;
-    }
-    
-    .message-row.assistant {
-        justify-content: flex-start;
-    }
+    .message-row { display: flex; margin: 1.5rem 0; }
+    .message-row.user { justify-content: flex-end; }
+    .message-row.assistant { justify-content: flex-start; }
     
     .message-bubble {
         max-width: 80%;
@@ -198,106 +143,33 @@ st.markdown("""
         word-wrap: break-word;
     }
     
-    .message-bubble.user {
-        background: #1E1E1E;
-        color: #FFFFFF;
-        border: 1px solid #333;
-    }
+    .message-bubble.user { background: #1E1E1E; color: #FFFFFF; border: 1px solid #333; }
+    .message-bubble.assistant { background: #0F0F0F; color: #E0E0E0; border: 1px solid #2A2A2A; }
     
-    .message-bubble.assistant {
-        background: #0F0F0F;
-        color: #E0E0E0;
-        border: 1px solid #2A2A2A;
-    }
-    
-    .message-content {
-        white-space: pre-wrap;
-        word-wrap: break-word;
-        overflow-wrap: break-word;
-    }
-    
-    .message-content br {
-        display: block;
-        content: "";
-        margin-top: 0.3rem;
-    }
-    
-    /* 思考动画样式 */
-    .thinking-container {
-        display: flex;
-        justify-content: flex-start;
-        margin: 1.5rem 0;
-    }
+    .message-content { white-space: pre-wrap; }
+    .message-content br { display: block; margin-top: 0.3rem; }
     
     .thinking-bubble {
         background: #0F0F0F;
         border: 1px solid #2A2A2A;
         border-radius: 1.2rem;
         padding: 1rem 1.4rem;
-        display: flex;
+        display: inline-flex;
         align-items: center;
         gap: 0.8rem;
-        max-width: 80%;
     }
     
-    .thinking-dots {
-        display: flex;
-        gap: 0.3rem;
-    }
-    
+    .thinking-dots { display: flex; gap: 0.3rem; }
     .thinking-dot {
-        width: 0.5rem;
-        height: 0.5rem;
+        width: 0.5rem; height: 0.5rem;
         background: #666;
         border-radius: 50%;
         animation: pulse 1.4s infinite;
     }
+    .thinking-dot:nth-child(2) { animation-delay: 0.2s; }
+    .thinking-dot:nth-child(3) { animation-delay: 0.4s; }
+    .thinking-text { color: #888; font-size: 0.9rem; }
     
-    .thinking-dot:nth-child(2) {
-        animation-delay: 0.2s;
-    }
-    
-    .thinking-dot:nth-child(3) {
-        animation-delay: 0.4s;
-    }
-    
-    .thinking-text {
-        color: #888;
-        font-size: 0.9rem;
-    }
-    
-    /* 反馈按钮区域 */
-    .feedback-container {
-        display: flex;
-        gap: 0.5rem;
-        justify-content: flex-start;
-        margin-top: 0.3rem;
-        margin-left: 0.5rem;
-        opacity: 0.4;
-        transition: opacity 0.2s;
-    }
-    
-    .feedback-container:hover {
-        opacity: 1;
-    }
-    
-    .feedback-btn {
-        background: none;
-        border: none;
-        color: #666;
-        font-size: 0.8rem;
-        cursor: pointer;
-        padding: 0.2rem 0.5rem;
-        border-radius: 1rem;
-        transition: all 0.2s;
-    }
-    
-    .feedback-btn:hover {
-        color: #1976d2;
-        background: #1A1A1A;
-    }
-    
-    /* 来源折叠框 */
     .source-item {
         background: #0A0A0A;
         padding: 0.5rem 0.8rem;
@@ -308,17 +180,15 @@ st.markdown("""
         font-size: 0.8rem;
     }
     
-    /* 输入区域 */
     .input-section {
         max-width: 700px;
-        margin: 2rem auto 0;
-        padding: 0 1rem;
+        margin: 0 auto;
+        padding: 1rem;
         position: fixed;
         bottom: 0;
         left: 0;
         right: 0;
         background: #0A0A0A;
-        padding: 1rem;
         border-top: 1px solid #333;
     }
     
@@ -328,48 +198,35 @@ st.markdown("""
         border-radius: 2rem !important;
         padding: 0.8rem 1.2rem !important;
         color: #FFFFFF !important;
-        font-size: 0.95rem !important;
-        transition: border-color 0.2s !important;
     }
     
-    .stTextInput input:focus {
-        border-color: #1976d2 !important;
-        outline: none !important;
-    }
-    
-    .stTextInput input::placeholder {
-        color: #444 !important;
-    }
+    .stTextInput input:focus { border-color: #1976d2 !important; }
+    .stTextInput input::placeholder { color: #444 !important; }
     
     .stButton > button {
         background: #1A1A1A !important;
         border: 1px solid #333 !important;
         border-radius: 2rem !important;
         color: #CCC !important;
-        padding: 0.5rem 1.5rem !important;
-        font-size: 0.9rem !important;
         transition: all 0.2s !important;
     }
     
-    .stButton > button:hover {
+    .stButton > button:hover:not(:disabled) {
         border-color: #1976d2 !important;
         color: #1976d2 !important;
-        background: #1A1A1A !important;
     }
     
-    /* 隐私提示 */
+    .stButton > button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+    
     .privacy-note {
         text-align: center;
         color: #333;
         font-size: 0.7rem;
         margin: 1rem 0;
         padding: 1rem;
-        letter-spacing: 0.3px;
-    }
-    
-    @keyframes fadeIn {
-        from { opacity: 0; transform: translateY(5px); }
-        to { opacity: 1; transform: translateY(0); }
     }
     
     @keyframes pulse {
@@ -379,7 +236,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ========== 极简标题 ==========
+# ========== 标题 ==========
 st.markdown("""
 <div class="title">
     🩺 医小管
@@ -387,81 +244,18 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ========== 极简侧边栏 ==========
+# ========== 侧边栏 ==========
 with st.sidebar:
     st.markdown("### ⚡")
-    if st.button("🗑️", help="清空对话"):
-        # 重置所有状态
+    if st.button("🗑️ 清空对话", use_container_width=True):
         st.session_state.messages = [
             {"role": "assistant", "content": "👋 你好，我是医小管\n\n**你的专属AI辅导员**"}
         ]
         st.session_state.conversation_id = None
-        st.session_state.app_state = "idle"
+        st.session_state.processing = False
         st.session_state.pending_question = None
-        st.session_state.pending_reply = None
-        st.session_state.pending_sources = None
-        st.session_state.processing_lock = False
+        st.session_state.input_key += 1
         st.rerun()
-
-# ========== 状态机处理 ==========
-
-# 1. 如果有待处理的回复，先添加到消息历史
-if st.session_state.pending_reply and st.session_state.app_state == "idle":
-    st.session_state.messages.append({
-        "role": "assistant", 
-        "content": st.session_state.pending_reply,
-        "sources": st.session_state.pending_sources
-    })
-    st.session_state.pending_reply = None
-    st.session_state.pending_sources = None
-    st.rerun()
-
-# 2. 如果正在思考，调用API
-if st.session_state.app_state == "thinking" and st.session_state.pending_question:
-    question = st.session_state.pending_question
-    
-    # 调用API（带超时保护）
-    try:
-        result = st.session_state.llm.ask(question, st.session_state.conversation_id)
-        
-        if isinstance(result, tuple) and len(result) == 3:
-            reply, new_conversation_id, sources = result
-        elif isinstance(result, tuple) and len(result) == 2:
-            reply, new_conversation_id = result
-            sources = ["回答基于知识库生成"]
-        else:
-            reply = result
-            new_conversation_id = None
-            sources = []
-        
-        if new_conversation_id:
-            st.session_state.conversation_id = new_conversation_id
-        
-        # 添加引导语
-        reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
-        
-        # 记录日志
-        log_conversation(
-            question,
-            reply,
-            sources,
-            session_id=st.session_state.conversation_id
-        )
-        
-        # 保存待处理回复
-        st.session_state.pending_reply = reply
-        st.session_state.pending_sources = sources
-        
-    except Exception as e:
-        # API调用失败，显示错误信息
-        st.session_state.pending_reply = f"❌ 服务暂时不可用，请稍后再试。错误信息：{str(e)}"
-        st.session_state.pending_sources = []
-    
-    # 无论成功失败，都退出思考状态
-    st.session_state.app_state = "idle"
-    st.session_state.pending_question = None
-    st.session_state.processing_lock = False
-    st.rerun()
 
 # ========== 显示聊天历史 ==========
 st.markdown('<div class="chat-container">', unsafe_allow_html=True)
@@ -492,7 +286,7 @@ for idx, message in enumerate(st.session_state.messages):
         with col1:
             fb_col1, fb_col2 = st.columns(2)
             with fb_col1:
-                if st.button("👍", key=f"like_{idx}", help="有帮助"):
+                if st.button("👍", key=f"like_{idx}"):
                     prev_question = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
                     log_conversation(
                         prev_question,
@@ -503,7 +297,7 @@ for idx, message in enumerate(st.session_state.messages):
                     )
                     st.toast("👍 感谢反馈")
             with fb_col2:
-                if st.button("👎", key=f"dislike_{idx}", help="需改进"):
+                if st.button("👎", key=f"dislike_{idx}"):
                     prev_question = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
                     log_conversation(
                         prev_question,
@@ -512,15 +306,14 @@ for idx, message in enumerate(st.session_state.messages):
                         feedback="dislike",
                         session_id=st.session_state.conversation_id
                     )
-                    st.toast("👎 感谢反馈，我会努力改进")
+                    st.toast("👎 感谢反馈")
         
         with col2:
-            if st.button("📋", key=f"copy_{idx}", help="复制回答"):
+            if st.button("📋", key=f"copy_{idx}"):
                 js = f"navigator.clipboard.writeText(`{message['content']}`);"
                 st.components.v1.html(f"<script>{js}</script>", height=0)
                 st.toast("已复制")
         
-        # 来源
         if "sources" in message and message["sources"]:
             with st.expander("📚 来源"):
                 for i, source in enumerate(message["sources"], 1):
@@ -530,10 +323,10 @@ for idx, message in enumerate(st.session_state.messages):
                     </div>
                     """, unsafe_allow_html=True)
 
-# ========== 如果正在思考，显示思考动画 ==========
-if st.session_state.app_state == "thinking":
+# 如果正在处理中，显示思考动画
+if st.session_state.processing:
     st.markdown("""
-    <div class="thinking-container">
+    <div class="message-row assistant">
         <div class="thinking-bubble">
             <div class="thinking-dots">
                 <div class="thinking-dot"></div>
@@ -550,45 +343,86 @@ st.markdown('</div>', unsafe_allow_html=True)
 # ========== 输入区域 ==========
 st.markdown('<div class="input-section">', unsafe_allow_html=True)
 
-# 根据状态决定是否禁用输入
-input_disabled = st.session_state.app_state != "idle" or st.session_state.processing_lock
-
 col1, col2 = st.columns([6, 1])
 
 with col1:
     input_key = f"user_input_{st.session_state.input_key}"
     user_input = st.text_input(
         "",
-        placeholder="输入你的问题..." if not input_disabled else "正在处理中，请稍候...",
+        placeholder="输入你的问题..." if not st.session_state.processing else "正在处理中，请稍候...",
         label_visibility="collapsed",
         key=input_key,
-        disabled=input_disabled
+        disabled=st.session_state.processing
     )
 
 with col2:
     send_button = st.button(
         "发送", 
         use_container_width=True,
-        disabled=input_disabled
+        disabled=st.session_state.processing
     )
 
-# ========== 处理发送（带锁保护） ==========
-if (send_button or user_input) and user_input and not input_disabled:
-    # 上锁，防止重复提交
-    st.session_state.processing_lock = True
-    
+# ========== 处理发送 ==========
+if (send_button or user_input) and user_input and not st.session_state.processing:
     # 1. 立即添加用户消息
     st.session_state.messages.append({"role": "user", "content": user_input})
     st.session_state.input_key += 1
     
-    # 2. 设置思考状态
-    st.session_state.app_state = "thinking"
+    # 2. 设置处理状态
+    st.session_state.processing = True
     st.session_state.pending_question = user_input
     
-    # 3. 刷新页面
+    # 3. 立即刷新页面显示用户消息和动画
     st.rerun()
 
 st.markdown('</div>', unsafe_allow_html=True)
+
+# ========== 在页面底部处理AI回答（不阻塞界面） ==========
+if st.session_state.processing and st.session_state.pending_question:
+    question = st.session_state.pending_question
+    
+    # 调用API（这里会执行，但用户已经看到了动画）
+    try:
+        result = st.session_state.llm.ask(question, st.session_state.conversation_id)
+        
+        if isinstance(result, tuple) and len(result) == 3:
+            reply, new_conversation_id, sources = result
+        elif isinstance(result, tuple) and len(result) == 2:
+            reply, new_conversation_id = result
+            sources = ["回答基于知识库生成"]
+        else:
+            reply = result
+            new_conversation_id = None
+            sources = []
+        
+        if new_conversation_id:
+            st.session_state.conversation_id = new_conversation_id
+        
+        # 添加引导语
+        reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
+        
+        # 记录日志
+        log_conversation(
+            question,
+            reply,
+            sources,
+            session_id=st.session_state.conversation_id
+        )
+        
+        # 添加AI回答到消息历史
+        st.session_state.messages.append({"role": "assistant", "content": reply, "sources": sources})
+        
+    except Exception as e:
+        # 错误处理
+        error_msg = f"❌ 服务暂时不可用，请稍后再试。"
+        st.session_state.messages.append({"role": "assistant", "content": error_msg, "sources": []})
+    
+    # 重置处理状态
+    st.session_state.processing = False
+    st.session_state.pending_question = None
+    
+    # 刷新页面显示结果
+    st.rerun()
 
 # ========== 隐私提示 ==========
 st.markdown("""
