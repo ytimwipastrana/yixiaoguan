@@ -1,7 +1,6 @@
 """
 大模型服务 - 调用千帆Agent
-支持重试、缓存、稳定性优化和自我进化数据收集
-添加延时控制以避免QPS超限
+紧急版本：强制每秒最多1次请求，确保不触发限流
 """
 
 import requests
@@ -10,77 +9,101 @@ import streamlit as st
 import json
 import time
 import random
+import threading
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 class LLMService:
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        """单例模式，确保所有用户共享同一个实例"""
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+            return cls._instance
+    
     def __init__(self):
-        """初始化 - 从st.secrets读取API Key"""
-        try:
-            self.api_key = st.secrets["BAIDU_API_KEY"]
-            self.app_id = "3d1faab7-1cbf-4a77-8dd8-4f61947a8b57"  # 你的应用ID
+        """初始化 - 只执行一次"""
+        if not hasattr(self, 'initialized'):
+            self.initialized = True
             
-            if not self.api_key:
-                st.error("❌ 未找到API Key，请检查Streamlit Secrets配置")
-            
-            self.base_url = "https://qianfan.baidubce.com/v2/app/conversation/runs"
-            
-            # 创建带重试机制的会话
-            self.session = self._create_retry_session()
-            
-            # 延时控制参数
-            self.min_delay = 0.3  # 最小延时（秒）
-            self.max_delay = 0.7  # 最大延时（秒）
-            self.last_request_time = 0  # 上次请求时间
-            
-        except Exception as e:
-            st.error(f"❌ 初始化失败: {e}")
-            self.api_key = None
-            self.app_id = None
+            try:
+                self.api_key = st.secrets["BAIDU_API_KEY"]
+                self.app_id = "3d1faab7-1cbf-4a77-8dd8-4f61947a8b57"  # 你的应用ID
+                
+                if not self.api_key:
+                    st.error("❌ 未找到API Key，请检查Streamlit Secrets配置")
+                
+                self.base_url = "https://qianfan.baidubce.com/v2/app/conversation/runs"
+                
+                # 创建带重试机制的会话
+                self.session = self._create_retry_session()
+                
+                # ===== 限流控制参数 =====
+                self.last_request_time = 0  # 上次请求时间
+                self.request_interval = 1.2  # 强制每秒最多0.8次（1.2秒间隔）
+                self.request_queue = []  # 请求队列
+                self.processing = False  # 是否正在处理
+                
+                # 启动队列处理线程
+                self._start_queue_processor()
+                
+            except Exception as e:
+                st.error(f"❌ 初始化失败: {e}")
+                self.api_key = None
+                self.app_id = None
+    
+    def _start_queue_processor(self):
+        """启动队列处理线程"""
+        import threading
+        import time
+        
+        def process_queue():
+            while True:
+                if self.request_queue and not self.processing:
+                    self.processing = True
+                    # 取出请求
+                    question, conversation_id, callback = self.request_queue.pop(0)
+                    
+                    # 强制等待，确保不超过QPS限制
+                    current_time = time.time()
+                    time_since_last = current_time - self.last_request_time
+                    if time_since_last < self.request_interval:
+                        wait_time = self.request_interval - time_since_last
+                        time.sleep(wait_time)
+                    
+                    # 调用API
+                    try:
+                        result = self._make_request(question, conversation_id)
+                        callback(result)
+                    except Exception as e:
+                        callback((f"错误: {str(e)}", None, []))
+                    
+                    self.last_request_time = time.time()
+                    self.processing = False
+                
+                time.sleep(0.1)  # 避免CPU空转
+        
+        thread = threading.Thread(target=process_queue, daemon=True)
+        thread.start()
     
     def _create_retry_session(self, retries=3, backoff_factor=0.5):
-        """
-        创建带重试机制的requests会话
-        retries: 重试次数
-        backoff_factor: 重试间隔因子
-        """
+        """创建带重试机制的requests会话"""
         session = requests.Session()
         retry = Retry(
             total=retries,
             read=retries,
             connect=retries,
             backoff_factor=backoff_factor,
-            status_forcelist=[429, 500, 502, 503, 504],  # 遇到这些HTTP状态码时重试（包括429限流）
+            status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["POST"]
         )
         adapter = HTTPAdapter(max_retries=retry)
         session.mount('http://', adapter)
         session.mount('https://', adapter)
         return session
-    
-    def _apply_rate_limit(self):
-        """
-        应用速率限制，确保每秒请求不超过指定数量
-        使用随机延时避免固定间隔导致的请求堆积
-        """
-        current_time = time.time()
-        
-        # 计算自上次请求以来的时间差
-        time_since_last = current_time - self.last_request_time
-        
-        # 目标请求间隔（平均每秒2次请求 = 0.5秒间隔）
-        target_interval = 0.5
-        
-        # 如果距离上次请求太近，需要等待
-        if time_since_last < target_interval:
-            wait_time = target_interval - time_since_last
-            # 添加随机抖动，避免固定间隔
-            jitter = random.uniform(-0.1, 0.1)
-            wait_time = max(0, wait_time + jitter)
-            time.sleep(wait_time)
-        
-        # 更新上次请求时间
-        self.last_request_time = time.time()
     
     def _clean_answer(self, answer):
         """清理回答中的引用标记"""
@@ -91,158 +114,81 @@ class LLMService:
         cleaned = re.sub(r'\[\d+\]', '', cleaned)
         cleaned = re.sub(r'\^(\[\d+\])+\^', '', cleaned)
         cleaned = re.sub(r'\s+', ' ', cleaned)
-        cleaned = cleaned.strip()
-        
-        return cleaned
+        return cleaned.strip()
     
-    def ask(self, question, conversation_id=None, max_retries=3):
-        """
-        向千帆Agent提问（带重试和稳定性优化）
-        
-        Args:
-            question: 用户问题
-            conversation_id: 会话ID（用于多轮对话）
-            max_retries: 最大重试次数
-        
-        Returns:
-            tuple: (回答内容, 新的会话ID, 来源列表)
-        """
-        if not self.api_key:
-            return "API Key未配置", None, []
-        
-        # ===== 关键修改：应用速率限制 =====
-        self._apply_rate_limit()
-        
-        # 构建请求头
+    def _make_request(self, question, conversation_id):
+        """实际发起API请求"""
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
         }
         
-        # 稳重亲切风格的系统提示词
-        system_prompt = """你是一个医药管理学院的AI辅导员，名叫"医小管"。你的语气要专业稳重，像一位负责任的辅导员老师。
-
-【回答风格】
-1. 用"同学"称呼对方，语气温和
-2. 开头先问候，然后直接回答问题
-3. 信息要完整准确，重要内容可以适当强调
-4. 复杂问题可以分几点说明，但不要用Markdown符号
-5. 结尾可以问"还有其他需要了解的吗？"
-
-【示例】
-同学你好，关于国家奖学金申请，我来为你说明一下。
-
-申请的基本条件包括：综合素质测评排名前5%，无不及格科目。
-
-申请流程主要有几个步骤：
-第一，9月1日至15日提交申请表。
-第二，辅导员初步审核。
-第三，学院公开答辩评审。
-第四，学院公示2天。
-第五，学校最终评审并公示。
-
-申请时请准备好：申请表、成绩单、获奖证书复印件。
-
-还有其他需要了解的吗？"""
+        system_prompt = """你是一个医药管理学院的AI辅导员，名叫"医小管"。你的语气要专业稳重，像一位负责任的辅导员老师。"""
         
-        # 构建请求体
         data = {
             "app_id": self.app_id,
             "query": question,
             "stream": False,
             "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": question
-                }
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question}
             ]
         }
         
         if conversation_id:
             data["conversation_id"] = conversation_id
         
-        # 重试逻辑
-        for attempt in range(max_retries):
-            try:
-                # 使用带重试的会话发送请求
-                response = self.session.post(
-                    self.base_url,
-                    headers=headers,
-                    json=data,
-                    timeout=(10, 30)  # (连接超时, 读取超时)
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    
-                    answer = result.get("answer", "")
-                    new_conversation_id = result.get("conversation_id")
-                    
-                    # 清理引用标记
-                    cleaned_answer = self._clean_answer(answer)
-                    
-                    # 提取来源
-                    sources = self._extract_sources(result)
-                    
-                    return cleaned_answer, new_conversation_id, sources
-                    
-                elif response.status_code == 429:
-                    # 限流错误，需要更长等待
-                    if attempt < max_retries - 1:
-                        wait_time = (2 ** (attempt + 2))  # 4, 8, 16秒
-                        print(f"⚠️ 触发限流，等待 {wait_time} 秒后重试...")
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        return "服务暂时繁忙，请稍后再试 (限流)", None, []
-                        
-                elif response.status_code in [500, 502, 503, 504]:
-                    # 服务器错误
-                    if attempt < max_retries - 1:
-                        wait_time = 2 ** attempt
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        return f"服务暂时不可用，请稍后再试 (HTTP {response.status_code})", None, []
-                else:
-                    error_msg = f"API调用失败: HTTP {response.status_code}"
-                    try:
-                        error_detail = response.json()
-                        error_msg += f"\n{json.dumps(error_detail, ensure_ascii=False)}"
-                    except:
-                        pass
-                    
-                    return error_msg, None, []
-                    
-            except requests.exceptions.Timeout:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    return "请求超时，请稍后再试", None, []
-                    
-            except requests.exceptions.ConnectionError:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    return "网络连接失败，请检查网络", None, []
-                    
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    return f"错误：{str(e)}", None, []
+        # 发送请求
+        response = self.session.post(
+            self.base_url,
+            headers=headers,
+            json=data,
+            timeout=(10, 30)
+        )
         
-        return "服务暂时不可用，请稍后再试", None, []
+        if response.status_code == 200:
+            result = response.json()
+            answer = result.get("answer", "")
+            new_conversation_id = result.get("conversation_id")
+            cleaned_answer = self._clean_answer(answer)
+            sources = self._extract_sources(result)
+            return cleaned_answer, new_conversation_id, sources
+        else:
+            error_msg = f"API调用失败: HTTP {response.status_code}"
+            try:
+                error_detail = response.json()
+                error_msg += f"\n{json.dumps(error_detail, ensure_ascii=False)}"
+            except:
+                pass
+            return error_msg, None, []
+    
+    def ask(self, question, conversation_id=None):
+        """
+        向千帆Agent提问（使用队列排队）
+        """
+        if not self.api_key:
+            return "API Key未配置", None, []
+        
+        # 创建一个事件来等待结果
+        from threading import Event
+        
+        result_event = Event()
+        result_container = []
+        
+        def callback(result):
+            result_container.append(result)
+            result_event.set()
+        
+        # 将请求加入队列
+        self.request_queue.append((question, conversation_id, callback))
+        
+        # 等待结果（最多等待30秒）
+        result_event.wait(timeout=30)
+        
+        if result_container:
+            return result_container[0]
+        else:
+            return "请求超时，请稍后再试", None, []
     
     def _extract_sources(self, result):
         """提取知识来源"""
