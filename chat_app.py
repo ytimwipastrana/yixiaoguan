@@ -8,6 +8,7 @@ from datetime import datetime
 from llm_service import LLMService
 import threading
 import queue
+import uuid
 
 # ========== 页面配置 ==========
 st.set_page_config(
@@ -17,9 +18,14 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ========== 初始化会话状态（极简设计） ==========
+# ========== 初始化会话状态（绝对可靠的设计） ==========
 def init_session_state():
-    """初始化所有状态"""
+    """初始化所有状态，确保每个状态都有默认值"""
+    
+    # 基础配置
+    if "initialized" not in st.session_state:
+        st.session_state.initialized = True
+        st.session_state.session_id = str(uuid.uuid4())[:8]
     
     # 消息历史
     if "messages" not in st.session_state:
@@ -42,25 +48,51 @@ def init_session_state():
     
     # 核心服务
     if "llm" not in st.session_state:
-        st.session_state.llm = LLMService()
+        try:
+            st.session_state.llm = LLMService()
+        except Exception as e:
+            st.error(f"LLM服务初始化失败: {e}")
+            st.session_state.llm = None
     
     if "conversation_id" not in st.session_state:
         st.session_state.conversation_id = None
     
-    # 输入控制
-    if "input_key" not in st.session_state:
-        st.session_state.input_key = 0
+    # 输入控制 - 使用整数自增保证唯一性
+    if "input_counter" not in st.session_state:
+        st.session_state.input_counter = 0
     
-    # 处理状态 - 用最简单的布尔值
-    if "processing" not in st.session_state:
-        st.session_state.processing = False
+    # ===== 状态机设计（核心） =====
+    # 状态: idle(空闲), waiting(等待回复), processing(处理中)
+    if "app_status" not in st.session_state:
+        st.session_state.app_status = "idle"
     
-    if "pending_question" not in st.session_state:
-        st.session_state.pending_question = None
+    # 请求队列（用于防抖）
+    if "request_queue" not in st.session_state:
+        st.session_state.request_queue = []
     
-    # 结果队列（用于异步处理）
-    if "result_queue" not in st.session_state:
-        st.session_state.result_queue = queue.Queue()
+    # 当前处理的问题
+    if "current_question" not in st.session_state:
+        st.session_state.current_question = None
+    
+    # 当前处理的索引
+    if "current_index" not in st.session_state:
+        st.session_state.current_index = None
+    
+    # 结果缓存
+    if "result_cache" not in st.session_state:
+        st.session_state.result_cache = {}
+    
+    # 防抖计时器（最后请求时间）
+    if "last_request_time" not in st.session_state:
+        st.session_state.last_request_time = 0
+    
+    # 重试计数
+    if "retry_count" not in st.session_state:
+        st.session_state.retry_count = 0
+    
+    # 锁机制
+    if "lock_acquired" not in st.session_state:
+        st.session_state.lock_acquired = False
 
 init_session_state()
 
@@ -157,6 +189,7 @@ st.markdown("""
         display: inline-flex;
         align-items: center;
         gap: 0.8rem;
+        max-width: 80%;
     }
     
     .thinking-dots { display: flex; gap: 0.3rem; }
@@ -221,6 +254,13 @@ st.markdown("""
         cursor: not-allowed;
     }
     
+    .status-bar {
+        color: #666;
+        font-size: 0.8rem;
+        text-align: center;
+        margin-top: 0.5rem;
+    }
+    
     .privacy-note {
         text-align: center;
         color: #333;
@@ -247,15 +287,108 @@ st.markdown("""
 # ========== 侧边栏 ==========
 with st.sidebar:
     st.markdown("### ⚡")
+    st.caption(f"会话ID: {st.session_state.session_id}")
+    
     if st.button("🗑️ 清空对话", use_container_width=True):
+        # 重置所有状态
         st.session_state.messages = [
             {"role": "assistant", "content": "👋 你好，我是医小管\n\n**你的专属AI辅导员**"}
         ]
         st.session_state.conversation_id = None
-        st.session_state.processing = False
-        st.session_state.pending_question = None
-        st.session_state.input_key += 1
+        st.session_state.app_status = "idle"
+        st.session_state.current_question = None
+        st.session_state.request_queue = []
+        st.session_state.lock_acquired = False
+        st.session_state.input_counter += 1
         st.rerun()
+    
+    # 显示当前状态（调试用，上线后可删除）
+    with st.expander("🔧 调试信息"):
+        st.json({
+            "状态": st.session_state.app_status,
+            "队列长度": len(st.session_state.request_queue),
+            "锁状态": st.session_state.lock_acquired,
+            "重试次数": st.session_state.retry_count
+        })
+
+# ========== 处理请求队列 ==========
+# 这是核心逻辑：确保请求被可靠处理
+if st.session_state.request_queue and not st.session_state.lock_acquired:
+    # 获取锁
+    st.session_state.lock_acquired = True
+    
+    # 从队列中取出请求
+    request = st.session_state.request_queue.pop(0)
+    st.session_state.current_question = request["question"]
+    st.session_state.current_index = request["index"]
+    st.session_state.app_status = "processing"
+    
+    # 刷新页面开始处理
+    st.rerun()
+
+# ========== 处理当前请求 ==========
+if st.session_state.app_status == "processing" and st.session_state.current_question and st.session_state.llm:
+    question = st.session_state.current_question
+    
+    # 调用API
+    try:
+        result = st.session_state.llm.ask(question, st.session_state.conversation_id)
+        
+        if isinstance(result, tuple) and len(result) == 3:
+            reply, new_conversation_id, sources = result
+        elif isinstance(result, tuple) and len(result) == 2:
+            reply, new_conversation_id = result
+            sources = ["回答基于知识库生成"]
+        else:
+            reply = result
+            new_conversation_id = None
+            sources = []
+        
+        if new_conversation_id:
+            st.session_state.conversation_id = new_conversation_id
+        
+        # 添加引导语
+        reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
+        
+        # 记录日志
+        log_conversation(
+            question,
+            reply,
+            sources,
+            session_id=st.session_state.conversation_id
+        )
+        
+        # 保存结果到缓存
+        cache_key = f"{question}_{st.session_state.current_index}"
+        st.session_state.result_cache[cache_key] = (reply, sources)
+        
+        st.session_state.retry_count = 0  # 重置重试计数
+        
+    except Exception as e:
+        # 错误处理 - 可以重试
+        st.session_state.retry_count += 1
+        if st.session_state.retry_count < 3:
+            # 放回队列重试
+            st.session_state.request_queue.insert(0, {
+                "question": question,
+                "index": st.session_state.current_index,
+                "time": time.time()
+            })
+            error_msg = f"⏳ 网络波动，正在重试... ({st.session_state.retry_count}/3)"
+        else:
+            # 超过重试次数，返回错误信息
+            error_msg = f"❌ 服务暂时不可用，请稍后再试。"
+            st.session_state.result_cache[f"{question}_{st.session_state.current_index}"] = (error_msg, [])
+            st.session_state.retry_count = 0
+    
+    # 释放锁
+    st.session_state.lock_acquired = False
+    st.session_state.current_question = None
+    st.session_state.current_index = None
+    st.session_state.app_status = "idle" if not st.session_state.request_queue else "waiting"
+    
+    # 刷新页面
+    st.rerun()
 
 # ========== 显示聊天历史 ==========
 st.markdown('<div class="chat-container">', unsafe_allow_html=True)
@@ -323,9 +456,10 @@ for idx, message in enumerate(st.session_state.messages):
                     </div>
                     """, unsafe_allow_html=True)
 
-# 如果正在处理中，显示思考动画
-if st.session_state.processing:
-    st.markdown("""
+# 如果正在等待或处理中，显示思考动画
+if st.session_state.app_status in ["waiting", "processing"]:
+    status_text = "医小管正在思考..." if st.session_state.app_status == "processing" else "等待中..."
+    st.markdown(f"""
     <div class="message-row assistant">
         <div class="thinking-bubble">
             <div class="thinking-dots">
@@ -333,7 +467,7 @@ if st.session_state.processing:
                 <div class="thinking-dot"></div>
                 <div class="thinking-dot"></div>
             </div>
-            <span class="thinking-text">医小管正在思考...</span>
+            <span class="thinking-text">{status_text}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -343,86 +477,52 @@ st.markdown('</div>', unsafe_allow_html=True)
 # ========== 输入区域 ==========
 st.markdown('<div class="input-section">', unsafe_allow_html=True)
 
+# 判断是否禁用输入
+is_disabled = st.session_state.app_status in ["waiting", "processing"] or st.session_state.lock_acquired
+
 col1, col2 = st.columns([6, 1])
 
 with col1:
-    input_key = f"user_input_{st.session_state.input_key}"
+    input_key = f"user_input_{st.session_state.input_counter}"
     user_input = st.text_input(
         "",
-        placeholder="输入你的问题..." if not st.session_state.processing else "正在处理中，请稍候...",
+        placeholder="输入你的问题..." if not is_disabled else "正在处理中，请稍候...",
         label_visibility="collapsed",
         key=input_key,
-        disabled=st.session_state.processing
+        disabled=is_disabled
     )
 
 with col2:
     send_button = st.button(
         "发送", 
         use_container_width=True,
-        disabled=st.session_state.processing
+        disabled=is_disabled
     )
 
 # ========== 处理发送 ==========
-if (send_button or user_input) and user_input and not st.session_state.processing:
+if (send_button or user_input) and user_input and not is_disabled:
     # 1. 立即添加用户消息
     st.session_state.messages.append({"role": "user", "content": user_input})
-    st.session_state.input_key += 1
+    st.session_state.input_counter += 1
     
-    # 2. 设置处理状态
-    st.session_state.processing = True
-    st.session_state.pending_question = user_input
+    # 2. 添加到请求队列
+    st.session_state.request_queue.append({
+        "question": user_input,
+        "index": len(st.session_state.messages),
+        "time": time.time()
+    })
     
-    # 3. 立即刷新页面显示用户消息和动画
+    # 3. 更新状态
+    st.session_state.app_status = "waiting"
+    
+    # 4. 刷新页面
     st.rerun()
+
+# 显示队列状态（友好提示）
+if st.session_state.request_queue:
+    st.markdown(f'<div class="status-bar">⏳ 排队中... ({len(st.session_state.request_queue)}个问题待处理)</div>', unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
-
-# ========== 在页面底部处理AI回答（不阻塞界面） ==========
-if st.session_state.processing and st.session_state.pending_question:
-    question = st.session_state.pending_question
-    
-    # 调用API（这里会执行，但用户已经看到了动画）
-    try:
-        result = st.session_state.llm.ask(question, st.session_state.conversation_id)
-        
-        if isinstance(result, tuple) and len(result) == 3:
-            reply, new_conversation_id, sources = result
-        elif isinstance(result, tuple) and len(result) == 2:
-            reply, new_conversation_id = result
-            sources = ["回答基于知识库生成"]
-        else:
-            reply = result
-            new_conversation_id = None
-            sources = []
-        
-        if new_conversation_id:
-            st.session_state.conversation_id = new_conversation_id
-        
-        # 添加引导语
-        reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
-        
-        # 记录日志
-        log_conversation(
-            question,
-            reply,
-            sources,
-            session_id=st.session_state.conversation_id
-        )
-        
-        # 添加AI回答到消息历史
-        st.session_state.messages.append({"role": "assistant", "content": reply, "sources": sources})
-        
-    except Exception as e:
-        # 错误处理
-        error_msg = f"❌ 服务暂时不可用，请稍后再试。"
-        st.session_state.messages.append({"role": "assistant", "content": error_msg, "sources": []})
-    
-    # 重置处理状态
-    st.session_state.processing = False
-    st.session_state.pending_question = None
-    
-    # 刷新页面显示结果
-    st.rerun()
 
 # ========== 隐私提示 ==========
 st.markdown("""
