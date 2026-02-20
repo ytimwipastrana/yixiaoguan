@@ -1,1 +1,24 @@
+# 核心框架
 streamlit==1.28.0
+
+# HTTP请求
+requests==2.31.0
+
+# 数据处理（pandas及其核心依赖）
+pandas==2.2.0
+numpy==1.24.3
+python-dateutil==2.8.2
+pytz==2024.1
+tzdata==2024.1
+
+# 中文分词
+jieba==0.42.1
+
+# 数据可视化
+plotly==5.17.0
+tenacity==8.2.2
+packaging==24.0
+
+# 必要的构建工具
+setuptools>=68.0.0
+wheel>=0.41.0
