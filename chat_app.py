@@ -284,7 +284,7 @@ st.markdown("""
         background: #1A1A1A !important;
     }
     
-    /* 思考动画样式 - 放在AI消息位置 */
+    /* 思考动画样式 */
     .thinking-container {
         display: flex;
         justify-content: flex-start;
@@ -370,7 +370,7 @@ with st.sidebar:
         st.session_state.conversation_id = None
         st.rerun()
 
-# ========== 聊天区域 ==========
+# ========== 显示聊天历史 ==========
 st.markdown('<div class="chat-container">', unsafe_allow_html=True)
 
 for idx, message in enumerate(st.session_state.messages):
@@ -453,9 +453,9 @@ with col1:
 with col2:
     send_button = st.button("发送", use_container_width=True)
 
-# ========== 发送逻辑：立即显示用户消息，然后在AI位置显示思考动画 ==========
+# ========== 发送逻辑 ==========
 if (send_button or user_input) and user_input and not st.session_state.is_loading:
-    # 1. 立即显示用户消息
+    # 立即添加用户消息
     st.session_state.messages.append({"role": "user", "content": user_input})
     st.session_state.input_key += 1
     st.session_state.is_loading = True
@@ -463,12 +463,15 @@ if (send_button or user_input) and user_input and not st.session_state.is_loadin
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ========== 处理AI回答 - 在AI消息位置显示思考动画 ==========
+# ========== AI思考和处理 ==========
 if st.session_state.is_loading:
+    # 获取最后一条用户消息
     last_user_message = st.session_state.messages[-1]["content"]
     
-    # 在AI消息位置创建思考动画占位符
+    # 创建思考动画占位符（在AI消息位置）
     thinking_placeholder = st.empty()
+    
+    # 显示思考动画
     thinking_placeholder.markdown("""
     <div class="thinking-container">
         <div class="thinking-bubble">
@@ -482,7 +485,7 @@ if st.session_state.is_loading:
     </div>
     """, unsafe_allow_html=True)
     
-    # 调用 API
+    # 调用API
     result = st.session_state.llm.ask(
         last_user_message, 
         st.session_state.conversation_id
@@ -521,7 +524,7 @@ if st.session_state.is_loading:
     st.session_state.is_loading = False
     st.rerun()
 
-# ========== 隐私提示 - 底部小字 ==========
+# ========== 隐私提示 ==========
 st.markdown("""
 <div class="privacy-note">
     🛡️ 对话仅保存在本地 · 不上传个人信息 · 可随时清空
