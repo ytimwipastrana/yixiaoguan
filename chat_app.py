@@ -3,7 +3,6 @@ import time
 import re
 import csv
 import os
-import pandas as pd
 from datetime import datetime
 from llm_service import LLMService
 
@@ -14,7 +13,7 @@ st.set_page_config(
     layout="centered"
 )
 
-# ========== 极简初始化 ==========
+# ========== 初始化 ==========
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {
@@ -39,65 +38,50 @@ if "llm" not in st.session_state:
 if "conversation_id" not in st.session_state:
     st.session_state.conversation_id = None
 
-if "processing" not in st.session_state:
-    st.session_state.processing = False
+# 新增：待处理的回答
+if "pending_answer" not in st.session_state:
+    st.session_state.pending_answer = None
 
-# ========== 日志记录函数 ==========
+if "pending_sources" not in st.session_state:
+    st.session_state.pending_sources = None
+
+if "waiting_for_answer" not in st.session_state:
+    st.session_state.waiting_for_answer = False
+
+# ========== 日志记录 ==========
 def log_conversation(question, answer, sources, feedback=None, session_id=None):
-    """记录对话日志，用于后续分析"""
     log_file = "evolution_logs.csv"
-    
     try:
         if not os.path.exists(log_file):
             with open(log_file, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    '时间', '会话ID', '问题', '回答', '回答长度', 
-                    '来源数量', '用户反馈', '响应时间(ms)', '是否成功'
-                ])
-        
-        is_success = len(sources) > 0 and len(answer) > 20
+                writer.writerow(['时间', '会话ID', '问题', '回答', '来源数量', '反馈'])
         
         with open(log_file, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 session_id or '',
-                question[:100] + '...' if len(question) > 100 else question,
-                answer[:200] + '...' if len(answer) > 200 else answer,
-                len(answer),
+                question[:100],
+                answer[:100],
                 len(sources) if sources else 0,
-                feedback or '',
-                int((time.time() % 1) * 1000),
-                is_success
+                feedback or ''
             ])
-    except Exception as e:
-        print(f"日志记录失败: {e}")
+    except:
+        pass
 
-# ========== 强制换行函数 ==========
+# ========== 强制换行 ==========
 def format_with_line_breaks(text):
-    """强制处理换行"""
     if not text:
         return text
-    
     text = text.replace('\r\n', '\n').replace('\r', '\n')
-    text = text.replace('。', '。\n')
-    text = text.replace('？', '？\n')
-    text = text.replace('！', '！\n')
-    text = text.replace('；', '；\n')
-    text = text.replace('：', '：\n')
-    
+    text = text.replace('。', '。\n').replace('？', '？\n').replace('！', '！\n')
     text = re.sub(r'(\d+\.)', r'\n\1', text)
     text = re.sub(r'([一二三四五六七八九十])[、.]', r'\n\1、', text)
-    text = re.sub(r'（(\d+)）', r'\n（\1）', text)
-    text = re.sub(r'\n\s*\n', '\n\n', text)
-    
     lines = text.split('\n')
-    formatted = '<br>'.join(lines)
-    
-    return formatted
+    return '<br>'.join(lines)
 
-# ========== 极简CSS（保留所有样式） ==========
+# ========== CSS ==========
 st.markdown("""
 <style>
     .stApp { background: #0A0A0A; }
@@ -120,12 +104,10 @@ st.markdown("""
         font-size: 0.95rem;
         word-wrap: break-word;
     }
-    
     .message-bubble.user { background: #1E1E1E; color: #FFFFFF; border: 1px solid #333; }
     .message-bubble.assistant { background: #0F0F0F; color: #E0E0E0; border: 1px solid #2A2A2A; }
     
     .message-content { white-space: pre-wrap; }
-    .message-content br { display: block; margin-top: 0.3rem; }
     
     .thinking-bubble {
         background: #0F0F0F;
@@ -135,9 +117,7 @@ st.markdown("""
         display: inline-flex;
         align-items: center;
         gap: 0.8rem;
-        max-width: 80%;
     }
-    
     .thinking-dots { display: flex; gap: 0.3rem; }
     .thinking-dot {
         width: 0.5rem; height: 0.5rem;
@@ -178,7 +158,6 @@ st.markdown("""
         padding: 0.8rem 1.2rem !important;
         color: #FFFFFF !important;
     }
-    
     .stTextInput input:focus { border-color: #1976d2 !important; }
     .stTextInput input::placeholder { color: #444 !important; }
     
@@ -187,9 +166,7 @@ st.markdown("""
         border: 1px solid #333 !important;
         border-radius: 2rem !important;
         color: #CCC !important;
-        transition: all 0.2s !important;
     }
-    
     .stButton > button:hover:not(:disabled) {
         border-color: #1976d2 !important;
         color: #1976d2 !important;
@@ -226,8 +203,21 @@ with st.sidebar:
             {"role": "assistant", "content": "👋 你好，我是医小管\n\n**你的专属AI辅导员**"}
         ]
         st.session_state.conversation_id = None
-        st.session_state.processing = False
+        st.session_state.pending_answer = None
+        st.session_state.waiting_for_answer = False
         st.rerun()
+
+# ========== 如果有待处理的回答，先添加到消息历史 ==========
+if st.session_state.pending_answer:
+    st.session_state.messages.append({
+        "role": "assistant", 
+        "content": st.session_state.pending_answer,
+        "sources": st.session_state.pending_sources
+    })
+    st.session_state.pending_answer = None
+    st.session_state.pending_sources = None
+    st.session_state.waiting_for_answer = False
+    st.rerun()
 
 # ========== 显示聊天历史 ==========
 st.markdown('<div class="chat-container">', unsafe_allow_html=True)
@@ -242,12 +232,11 @@ for idx, message in enumerate(st.session_state.messages):
         </div>
         """, unsafe_allow_html=True)
     else:
-        formatted_content = format_with_line_breaks(message["content"])
-        
+        formatted = format_with_line_breaks(message["content"])
         st.markdown(f"""
         <div class="message-row assistant">
             <div class="message-bubble assistant">
-                <div class="message-content">{formatted_content}</div>
+                <div class="message-content">{formatted}</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -256,41 +245,41 @@ for idx, message in enumerate(st.session_state.messages):
         col1, col2, col3 = st.columns([1, 1, 8])
         with col1:
             if st.button("👍", key=f"like_{idx}"):
-                prev_question = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
-                log_conversation(
-                    prev_question,
-                    message["content"],
-                    message.get("sources", []),
-                    feedback="like",
-                    session_id=st.session_state.conversation_id
-                )
+                prev = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
+                log_conversation(prev, message["content"], message.get("sources", []), "like")
                 st.toast("👍 感谢反馈")
         with col2:
             if st.button("👎", key=f"dislike_{idx}"):
-                prev_question = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
-                log_conversation(
-                    prev_question,
-                    message["content"],
-                    message.get("sources", []),
-                    feedback="dislike",
-                    session_id=st.session_state.conversation_id
-                )
+                prev = st.session_state.messages[idx-1]["content"] if idx > 0 else ""
+                log_conversation(prev, message["content"], message.get("sources", []), "dislike")
                 st.toast("👎 感谢反馈")
         with col3:
             if st.button("📋", key=f"copy_{idx}"):
-                js = f"navigator.clipboard.writeText(`{message['content']}`);"
-                st.components.v1.html(f"<script>{js}</script>", height=0)
                 st.toast("已复制")
         
-        # 来源
         if "sources" in message and message["sources"]:
             with st.expander("📚 来源"):
-                for i, source in enumerate(message["sources"], 1):
+                for i, s in enumerate(message["sources"], 1):
                     st.markdown(f"""
                     <div class="source-item">
-                        <span>📄</span> {source[:150]}...
+                        <span>📄</span> {s[:150]}...
                     </div>
                     """, unsafe_allow_html=True)
+
+# 如果正在等待回答，显示思考动画
+if st.session_state.waiting_for_answer:
+    st.markdown("""
+    <div class="message-row assistant">
+        <div class="thinking-bubble">
+            <div class="thinking-dots">
+                <div class="thinking-dot"></div>
+                <div class="thinking-dot"></div>
+                <div class="thinking-dot"></div>
+            </div>
+            <span class="thinking-text">医小管正在思考...</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -302,71 +291,57 @@ col1, col2 = st.columns([6, 1])
 with col1:
     user_input = st.text_input(
         "",
-        placeholder="输入你的问题..." if not st.session_state.processing else "正在处理中，请稍候...",
+        placeholder="输入你的问题..." if not st.session_state.waiting_for_answer else "正在处理中，请稍候...",
         label_visibility="collapsed",
         key=f"input_{len(st.session_state.messages)}",
-        disabled=st.session_state.processing
+        disabled=st.session_state.waiting_for_answer
     )
 
 with col2:
     send_button = st.button(
         "发送", 
         use_container_width=True,
-        disabled=st.session_state.processing
+        disabled=st.session_state.waiting_for_answer
     )
 
 # ========== 处理发送 ==========
-if (send_button or user_input) and user_input and not st.session_state.processing:
-    # 1. 立即添加用户消息
+if (send_button or user_input) and user_input and not st.session_state.waiting_for_answer:
+    # 1. 立即显示用户消息（这一步是关键！）
     st.session_state.messages.append({"role": "user", "content": user_input})
-    st.session_state.processing = True
+    
+    # 2. 设置等待状态，显示动画
+    st.session_state.waiting_for_answer = True
+    
+    # 3. 调用API并获取结果
+    result = st.session_state.llm.ask(user_input, st.session_state.conversation_id)
+    
+    if isinstance(result, tuple) and len(result) == 3:
+        reply, new_id, sources = result
+    elif isinstance(result, tuple) and len(result) == 2:
+        reply, new_id = result
+        sources = ["回答基于知识库生成"]
+    else:
+        reply = str(result)
+        new_id = None
+        sources = []
+    
+    if new_id:
+        st.session_state.conversation_id = new_id
+    
+    # 添加引导语
+    reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。"
+    
+    # 记录日志
+    log_conversation(user_input, reply, sources, session_id=st.session_state.conversation_id)
+    
+    # 保存结果到待处理
+    st.session_state.pending_answer = reply
+    st.session_state.pending_sources = sources
+    
+    # 刷新页面
     st.rerun()
 
 st.markdown('</div>', unsafe_allow_html=True)
-
-# ========== 处理AI回答 ==========
-if st.session_state.processing:
-    last_message = st.session_state.messages[-1]
-    if last_message["role"] == "user":
-        question = last_message["content"]
-        
-        # 显示思考动画
-        with st.chat_message("assistant"):
-            with st.spinner("医小管正在思考..."):
-                result = st.session_state.llm.ask(question, st.session_state.conversation_id)
-                
-                if isinstance(result, tuple) and len(result) == 3:
-                    reply, new_conversation_id, sources = result
-                elif isinstance(result, tuple) and len(result) == 2:
-                    reply, new_conversation_id = result
-                    sources = ["回答基于知识库生成"]
-                else:
-                    reply = result
-                    new_conversation_id = None
-                    sources = []
-                
-                if new_conversation_id:
-                    st.session_state.conversation_id = new_conversation_id
-                
-                # 添加引导语
-                reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
-                
-                # 记录日志
-                log_conversation(
-                    question,
-                    reply,
-                    sources,
-                    session_id=st.session_state.conversation_id
-                )
-                
-                # 显示回答
-                formatted_reply = format_with_line_breaks(reply)
-                st.markdown(formatted_reply)
-        
-        # 保存回答
-        st.session_state.messages.append({"role": "assistant", "content": reply, "sources": sources})
-        st.session_state.processing = False
-        st.rerun()
 
 # ========== 隐私提示 ==========
 st.markdown("""
