@@ -43,9 +43,18 @@ if "conversation_id" not in st.session_state:
 if "input_key" not in st.session_state:
     st.session_state.input_key = 0
 
-# ========== 新增：用于处理待回复的状态 ==========
-if "pending_response" not in st.session_state:
-    st.session_state.pending_response = None
+# ========== 新增：用于控制思考动画和待回复 ==========
+if "is_thinking" not in st.session_state:
+    st.session_state.is_thinking = False
+
+if "thinking_question" not in st.session_state:
+    st.session_state.thinking_question = None
+
+if "pending_reply" not in st.session_state:
+    st.session_state.pending_reply = None
+
+if "pending_sources" not in st.session_state:
+    st.session_state.pending_sources = None
 
 # ========== 日志记录函数 ==========
 def log_conversation(question, answer, sources, feedback=None, session_id=None):
@@ -147,9 +156,10 @@ st.markdown("""
     .chat-container {
         max-width: 700px;
         margin: 0 auto;
+        padding-bottom: 100px;
     }
     
-    /* 消息行 - 用于显示历史消息 */
+    /* 消息行 */
     .message-row {
         display: flex;
         margin: 1.5rem 0;
@@ -195,6 +205,50 @@ st.markdown("""
         display: block;
         content: "";
         margin-top: 0.3rem;
+    }
+    
+    /* 思考动画样式 */
+    .thinking-container {
+        display: flex;
+        justify-content: flex-start;
+        margin: 1.5rem 0;
+    }
+    
+    .thinking-bubble {
+        background: #0F0F0F;
+        border: 1px solid #2A2A2A;
+        border-radius: 1.2rem;
+        padding: 1rem 1.4rem;
+        display: flex;
+        align-items: center;
+        gap: 0.8rem;
+        max-width: 80%;
+    }
+    
+    .thinking-dots {
+        display: flex;
+        gap: 0.3rem;
+    }
+    
+    .thinking-dot {
+        width: 0.5rem;
+        height: 0.5rem;
+        background: #666;
+        border-radius: 50%;
+        animation: pulse 1.4s infinite;
+    }
+    
+    .thinking-dot:nth-child(2) {
+        animation-delay: 0.2s;
+    }
+    
+    .thinking-dot:nth-child(3) {
+        animation-delay: 0.4s;
+    }
+    
+    .thinking-text {
+        color: #888;
+        font-size: 0.9rem;
     }
     
     /* 反馈按钮区域 */
@@ -244,7 +298,13 @@ st.markdown("""
         max-width: 700px;
         margin: 2rem auto 0;
         padding: 0 1rem;
-        position: relative;
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        background: #0A0A0A;
+        padding: 1rem;
+        border-top: 1px solid #333;
     }
     
     .stTextInput input {
@@ -287,15 +347,19 @@ st.markdown("""
         text-align: center;
         color: #333;
         font-size: 0.7rem;
-        margin-top: 2rem;
+        margin: 1rem 0;
         padding: 1rem;
         letter-spacing: 0.3px;
-        border-top: 1px solid #1A1A1A;
     }
     
     @keyframes fadeIn {
         from { opacity: 0; transform: translateY(5px); }
         to { opacity: 1; transform: translateY(0); }
+    }
+    
+    @keyframes pulse {
+        0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+        30% { transform: translateY(-3px); opacity: 1; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -316,25 +380,24 @@ with st.sidebar:
             {"role": "assistant", "content": "👋 你好，我是医小管\n\n**你的专属AI辅导员**"}
         ]
         st.session_state.conversation_id = None
-        st.session_state.pending_response = None
+        st.session_state.is_thinking = False
+        st.session_state.thinking_question = None
+        st.session_state.pending_reply = None
+        st.session_state.pending_sources = None
         st.rerun()
 
-# ========== 处理待处理的AI回复（关键新增逻辑） ==========
-if st.session_state.pending_response:
-    # 从待处理中取出结果
-    reply, new_conversation_id, sources = st.session_state.pending_response
+# ========== 处理待处理的回复 ==========
+if st.session_state.pending_reply and not st.session_state.is_thinking:
+    # 添加AI回答到历史
+    st.session_state.messages.append({
+        "role": "assistant", 
+        "content": st.session_state.pending_reply,
+        "sources": st.session_state.pending_sources
+    })
     
-    # 更新会话ID
-    if new_conversation_id:
-        st.session_state.conversation_id = new_conversation_id
-    
-    # 添加AI回答到消息历史
-    st.session_state.messages.append({"role": "assistant", "content": reply, "sources": sources})
-    
-    # 清空待处理状态
-    st.session_state.pending_response = None
-    
-    # 刷新页面显示新消息
+    # 清空待处理
+    st.session_state.pending_reply = None
+    st.session_state.pending_sources = None
     st.rerun()
 
 # ========== 显示聊天历史 ==========
@@ -404,55 +467,91 @@ for idx, message in enumerate(st.session_state.messages):
                     </div>
                     """, unsafe_allow_html=True)
 
+# ========== 如果正在思考，显示思考动画 ==========
+if st.session_state.is_thinking:
+    st.markdown("""
+    <div class="thinking-container">
+        <div class="thinking-bubble">
+            <div class="thinking-dots">
+                <div class="thinking-dot"></div>
+                <div class="thinking-dot"></div>
+                <div class="thinking-dot"></div>
+            </div>
+            <span class="thinking-text">医小管正在思考...</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ========== 输入区域 - 使用 st.chat_input 替换原来的输入方式 ==========
-# st.chat_input 是专门为聊天设计的，用户体验更好
-prompt = st.chat_input("输入你的问题...")
+# ========== 输入区域 ==========
+st.markdown('<div class="input-section">', unsafe_allow_html=True)
 
-# ========== 处理用户输入 ==========
-if prompt:
-    # 1. 立即添加用户消息到历史
-    st.session_state.messages.append({"role": "user", "content": prompt})
+col1, col2 = st.columns([6, 1])
+
+with col1:
+    input_key = f"user_input_{st.session_state.input_key}"
+    user_input = st.text_input(
+        "",
+        placeholder="输入你的问题...",
+        label_visibility="collapsed",
+        key=input_key
+    )
+
+with col2:
+    send_button = st.button("发送", use_container_width=True)
+
+# ========== 处理发送 ==========
+if (send_button or user_input) and user_input and not st.session_state.is_thinking:
+    # 1. 立即添加用户消息
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state.input_key += 1
     
-    # 2. 立即显示"正在思考"的占位符
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        message_placeholder.markdown("🤔 医小管正在思考...")
-        
-        # 3. 调用API（这里会等待，但用户已经看到了动画）
-        with st.spinner(""):
-            result = st.session_state.llm.ask(prompt, st.session_state.conversation_id)
-            
-            # 解析结果
-            if isinstance(result, tuple) and len(result) == 3:
-                reply, new_conversation_id, sources = result
-            elif isinstance(result, tuple) and len(result) == 2:
-                reply, new_conversation_id = result
-                sources = ["回答基于知识库生成"]
-            else:
-                reply = result
-                new_conversation_id = None
-                sources = []
-            
-            # 添加引导语
-            reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
-            
-            # 记录日志
-            log_conversation(
-                prompt,
-                reply,
-                sources,
-                session_id=new_conversation_id
-            )
-        
-        # 4. API返回后，用真实答案替换占位符
-        message_placeholder.markdown(reply)
+    # 2. 设置思考状态
+    st.session_state.is_thinking = True
+    st.session_state.thinking_question = user_input
+    st.rerun()
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ========== 处理AI思考 ==========
+if st.session_state.is_thinking and st.session_state.thinking_question:
+    question = st.session_state.thinking_question
     
-    # 5. 将结果保存到待处理状态
-    st.session_state.pending_response = (reply, new_conversation_id, sources)
+    # 调用API
+    result = st.session_state.llm.ask(question, st.session_state.conversation_id)
     
-    # 6. 刷新页面，将消息正式添加到历史列表
+    if isinstance(result, tuple) and len(result) == 3:
+        reply, new_conversation_id, sources = result
+    elif isinstance(result, tuple) and len(result) == 2:
+        reply, new_conversation_id = result
+        sources = ["回答基于知识库生成"]
+    else:
+        reply = result
+        new_conversation_id = None
+        sources = []
+    
+    if new_conversation_id:
+        st.session_state.conversation_id = new_conversation_id
+    
+    # 添加引导语
+    reply += "\n\n---\n如果对回答满意，欢迎点击下方的 👍 反馈。测试阶段，你的每一条反馈都会帮助我变得更好 🙏"
+    
+    # 记录日志
+    log_conversation(
+        question,
+        reply,
+        sources,
+        session_id=st.session_state.conversation_id
+    )
+    
+    # 保存待处理回复
+    st.session_state.pending_reply = reply
+    st.session_state.pending_sources = sources
+    
+    # 关闭思考状态
+    st.session_state.is_thinking = False
+    st.session_state.thinking_question = None
     st.rerun()
 
 # ========== 隐私提示 ==========
